@@ -95,7 +95,7 @@ def template_peak_metrics(
     systolic_duration_frac: float = _DEFAULT_SYSTOLIC_DURATION_FRAC,
     **kwargs,
 ) -> dict[str, float]:
-    """模板单周期峰值指标：早期收缩峰/舒张峰、融合点流量等。"""
+    """模板单周期峰值指标：早期收缩峰/舒张峰、融合点流量等。以方便调节模版参数。"""
     if tau is None:
         tau = np.linspace(0.0, 1.0, 4096, endpoint=False)
     t_sp = float(
@@ -390,7 +390,7 @@ if __name__ == "__main__":
     heart_rate: float = 75.
     cardiac_output: float = 5.
     coronary_fraction: float = 0.03
-    duration_s: float = 6.4
+    duration_s: float = 2.4
     t = np.linspace(0.0, duration_s, int(1000 * duration_s))
     q = coronary_inlet_flow(
         t,

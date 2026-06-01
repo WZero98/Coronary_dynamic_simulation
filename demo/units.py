@@ -8,7 +8,7 @@ MMHG_TO_CGS = 1333.22  # dyne/cm² per mmHg
 CGS_TO_MMHG = 1.0 / MMHG_TO_CGS
 
 # 血管入口参考平均脉压
-P_INLET_REF_MMHG = 80.0
+P_INLET_REF_MMHG = 90.0
 P_VENOUS_DEFAULT_MMHG = 5.0
 
 
