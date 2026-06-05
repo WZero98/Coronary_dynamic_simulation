@@ -20,10 +20,10 @@
 import numpy as np
 from typing import Literal
 
+from coronary_constants import P_INLET_REF_MMHG
 from coronary_inlet import coronary_inlet_flow
 
-# 默认微循环参数
-P_INLET_REF_MMHG = 80
+# 默认微循环参数（以下划线开头的常量仅在本模块内使用）
 _DEFAULT_C_ML_PER_MMHG = 0.08
 _DEFAULT_Q_MEAN_ML_S = 3
 
@@ -82,7 +82,7 @@ def _integrate_windkessel2(
     c = max(float(compliance), 1e-9)
 
     def rhs(ti: float, pi: float) -> float:
-        qi = float(np.interp(ti, t, q))
+        qi = float(np.interp(ti, t, q))  # 线性插值计算某个单元点的流量q
         return (qi - pi / rd) / c
 
     for i in range(1, t.size):
