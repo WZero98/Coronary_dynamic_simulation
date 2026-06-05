@@ -657,7 +657,6 @@ class NavierStokes1D:
         ax.plot(xx, self.history_area[-1], "b-", label="A")
         axr = ax.twinx()
         axr.plot(xx, self.history_pressure[-1], "g--", label="p")
-        axr.plot(xx, self.history_flow[-1], "r-", alpha=0.85, label="Q")
         ax.set(xlabel="x (cm)", title=f"t = {tt[-1]:.3f} s")
         ax.grid(True, alpha=0.3)
 
@@ -666,25 +665,26 @@ class NavierStokes1D:
 
 
 def _demo():
-    length, nx = 30.0, 121
-    x_prof = np.linspace(0.0, length, 60)
-    radius = 0.38 - 0.10 * (x_prof / length)
-    area_prof = np.pi * radius**2
+    pullback_speed = 75  # mm/s
+    frames_per_s = 200 # fps
+    pullback_time = 2  # s
+    nx = int(pullback_time * frames_per_s)
+    length = pullback_speed * pullback_time / 10  # cm
+    duration_s = 3  # s
+    x = np.linspace(0, length, nx)
+    area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
+    print(nx, length)
 
-    par = BloodFlowParameters(
-        heart_rate_bpm=75.0,
-        coronary_flow_fraction=0.03,
-        outlet_windkessel="2wk",
-        cfl=0.45,
-    )
+    lesions = [(3, 4, 1, 10), (7, 8, 1, 10)]
+
+    par = BloodFlowParameters()
     solver = NavierStokes1D(length, nx, par)
     solver.set_lumen_area_profile(
-        area_prof,
-        x=x_prof,
-        lesions=[(11.0, 17.0, 0.6, 4.5)],
+        area,
+        x=x,
+        lesions=lesions,
     )
-    solver.run(duration_s=2.0, record_interval_steps=30)
-    print(f"FFR ≈ {solver.ffr_ratio():.3f}")
+    solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results()
 
 
