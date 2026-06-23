@@ -70,24 +70,6 @@ def lumen_pressure_mmhg(
     return p_ref + b * (np.sqrt(a) - np.sqrt(a0))
 
 
-def momentum_head_mmhg(
-    pressure: np.ndarray,
-    area: np.ndarray,
-    flow: np.ndarray,
-    rho_mmhg: float,
-    alpha: float = 1.1,
-) -> np.ndarray:
-    """
-    动量水头 H_mom（mmHg）：tube law 压力 + 动能修正项。
-
-    由动量通量 F₁ = αQ²/A + pA/ρ* 得 H_mom = F₁·ρ*/A = p + α·ρ*·Q²/A²。
-    """
-    a = np.maximum(np.asarray(area, dtype=float), 1e-12)
-    q = np.asarray(flow, dtype=float)
-    p = np.asarray(pressure, dtype=float)
-    return p + float(alpha) * float(rho_mmhg) * q**2 / a**2
-
-
 def area_from_lumen_pressure_mmhg(
     pressure: float | np.ndarray,
     area_ref,
@@ -247,7 +229,7 @@ class BloodFlowParameters:
     """固定物性、数值、入口与出口参数。"""
 
     # 流体相关
-    rho: float = 1.05  # 血液密度 (g/cm³)
+    rho: float = 1.06  # 血液密度 (g/cm³)
     alpha: float = 1.1  # 动量修正系数（层流常取 1.1）
     mu: float = 0.0035  # 血液粘度 (cm²/s)
     cfl: float = 1.0  # 数值稳定性参数 CFL
@@ -255,7 +237,7 @@ class BloodFlowParameters:
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 750.0  # 默认β，越大表示管腔越硬（管壁刚度）
+    beta_mmhg_per_sqrt_cm: float = 3250  # 默认β，越大表示管腔越硬（管壁刚度）
     stenosis_loss_coefficient: float = 1.0  # 狭窄形阻系数 K 的全局标定因子
 
     # 冠脉血流入口相关
@@ -407,7 +389,6 @@ class NavierStokes1D:
         self.stenosis_loss_k = np.zeros(self.nx)  # 狭窄形阻强度 K(x)，单位 1/cm
         self.state = np.zeros((2, self.nx))  # U = [A(x, t), Q(x, t)] 状态变量
         self.pressure = np.zeros(self.nx)  # P(x, t) 管腔壁所受侧压力
-        self.momentum_head = np.zeros(self.nx)  # H_mom(x, t) 动量水头 (mmHg)
 
         self.outlet = _OutletWindkesselState(self.paras)  # 出口状态
         self.time = 0.0
@@ -417,7 +398,6 @@ class NavierStokes1D:
         self.history_area: np.ndarray | None = None
         self.history_flow: np.ndarray | None = None
         self.history_pressure: np.ndarray | None = None
-        self.history_momentum_head: np.ndarray | None = None
 
     def set_lumen_area_profile(
         self,
@@ -484,7 +464,6 @@ class NavierStokes1D:
         self.state[0] = self.area_ref.copy()
         self.state[1] = 0.0
         self._update_pressure()  # 管腔各处压力初始值
-        self._update_momentum_head()
         self.outlet.reset(p_wk=float(self.pressure[-1]))  # 出口压力初始值
 
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
@@ -493,22 +472,6 @@ class NavierStokes1D:
             u[0], self.area_ref, self.beta, self.paras.p_ref_mmhg
         )
         return self.pressure
-
-    def _update_momentum_head(
-        self,
-        state: np.ndarray | None = None,
-        pressure: np.ndarray | None = None,
-    ) -> np.ndarray:
-        u = self.state if state is None else state
-        p = self.pressure if pressure is None else pressure
-        self.momentum_head = momentum_head_mmhg(
-            p,
-            u[0],
-            u[1],
-            self.paras.momentum_rho(),
-            self.paras.alpha,
-        )
-        return self.momentum_head
 
     def _spatial_operator(self, state: np.ndarray) -> np.ndarray:
         """有限体积右端项：−∂F/∂x + S。"""
@@ -618,7 +581,6 @@ class NavierStokes1D:
         )
         self.state = self._apply_boundaries(self.state, advance_outlet=True)
         self._update_pressure()
-        self._update_momentum_head()
 
     def run(
         self,
@@ -636,7 +598,6 @@ class NavierStokes1D:
         a_hist = [self.state[0].copy()]
         q_hist = [self.state[1].copy()]
         p_hist = [self.pressure.copy()]
-        h_hist = [self.momentum_head.copy()]
         step = 0
 
         print(
@@ -662,13 +623,11 @@ class NavierStokes1D:
                 a_hist.append(self.state[0].copy())
                 q_hist.append(self.state[1].copy())
                 p_hist.append(self.pressure.copy())
-                h_hist.append(self.momentum_head.copy())
 
         self.history_time = np.array(t_hist)
         self.history_area = np.array(a_hist)
         self.history_flow = np.array(q_hist)
         self.history_pressure = np.array(p_hist)
-        self.history_momentum_head = np.array(h_hist)
         t1 = time.perf_counter()
         print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
         return (
@@ -680,11 +639,11 @@ class NavierStokes1D:
 
     def ffr_ratio(self) -> float:
         """简化 FFR：远端/近端时间平均管腔压之比。"""
-        if self.history_momentum_head is None:
-            momentum_head = self.momentum_head
+        if self.history_pressure is None:
+            p_mean = self.pressure
         else:
-            momentum_head = np.mean(self.history_momentum_head, axis=0)
-        return momentum_head / momentum_head[0]
+            p_mean = np.mean(self.history_pressure, axis=0)
+        return p_mean / p_mean[0]
 
     @staticmethod
     def reference_outlet_pressure(
@@ -741,30 +700,25 @@ class NavierStokes1D:
         fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
 
         ax = axes[0, 1]
-        p_mean = np.mean(self.history_pressure, axis=0)
-        h_mean = np.mean(self.history_momentum_head, axis=0)
-        ax.plot(xx, p_mean, "g-", lw=1.8, label="p tube law")
-        ax.plot(xx, h_mean, "b-", lw=1.8, label="H_mom 动量水头")
-        ax.set(xlabel="x (cm)", ylabel="mmHg", title="沿程压力与动量水头（时间平均）")
+        q_mean = np.mean(self.history_flow[1500:, :], axis=0)
+        ax.plot(xx, q_mean, "g-", lw=1.8, label="p tube law")
+        ax.set(xlabel="x (cm)", ylabel="mmHg", title="沿程流量（时间平均）")
         ax.legend(loc="best", fontsize=9)
         ax.grid(True, alpha=0.3)
 
         ax = axes[1, 0]
-        ax.plot(tt, self.history_flow[:, 10], "r-", lw=1.5, label="x=10 Q")
-        ax.plot(tt, self.history_flow[:, 1], "b-", lw=1.5, label="x=1 Q")
-        ax2 = ax.twinx()
-        ax2.plot(tt, self.history_pressure[:, 10], "r--", lw=1.5, label="x=10 p")
-        ax2.plot(tt, self.history_pressure[:, 1], "b--", lw=1.5, label="x=1 p")
-        ax.set(xlabel="t (s)", title="x = 1 / 10 cm")
+        ax.plot(tt, self.history_pressure[:, 300], "r-", lw=1.5, label="x=300 p")
+        ax.plot(tt, self.history_pressure[:, 10], "b-", lw=1.5, label="x=10 p")
+        ax.set(xlabel="t (s)", ylabel="p(mmHg)", title="x = 10(blue) / 300(red)")
         ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=9)
 
         ax = axes[1, 1]
         ax.plot(xx, self.history_area[-1], "b-", lw=1.5, label="A")
         ax.set(xlabel="x (cm)", ylabel="A (cm²)", title=f"t = {tt[-1]:.3f} s")
         axr = ax.twinx()
         axr.plot(xx, self.history_pressure[-1], "g--", lw=1.5, label="p")
-        axr.plot(xx, self.history_momentum_head[-1], "c-", lw=1.5, label="H_mom")
-        axr.set_ylabel("p, H_mom (mmHg)")
+        axr.set_ylabel("p (mmHg)")
         lines_l, labels_l = ax.get_legend_handles_labels()
         lines_r, labels_r = axr.get_legend_handles_labels()
         ax.legend(lines_l + lines_r, labels_l + labels_r, loc="best", fontsize=9)
@@ -775,31 +729,38 @@ class NavierStokes1D:
 
 
 def _demo():
-    pullback_speed = 75  # mm/s
+    from scipy.ndimage import gaussian_filter1d
+    np.random.seed(569)
+    sigma_nodes = 2.0   # 按网格点，2–5 试起
+    pullback_speed = 36  # mm/s
     frames_per_s = 200 # fps
     pullback_time = 2  # s
-    nx = int(pullback_time * frames_per_s)
+    # nx = int(pullback_time * frames_per_s)
     length = pullback_speed * pullback_time / 10  # cm
-    duration_s = 5  # s
+    duration_s = 3  # s
+    area_file = np.load('area.npy')
+    area = area_file[::-1] / 100
+    area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
+    nx = area.shape[0]
     x = np.linspace(0, length, nx)
-    np.random.seed(569)
-    area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
+    # area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
     print(nx, length)
 
-    lesions = [(3, 4, 0.95, 3), (7, 8, 0.95, 5)]
+    # lesions = [(3, 4, 0.95, 10), (7, 8, 0.95, 10)]
+    lesions = None
 
     par = BloodFlowParameters()
     solver = NavierStokes1D(length, nx, par)
     solver.set_lumen_area_profile(
-        area,
+        area_smooth,
         x=x,
         lesions=lesions,
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results()
 
-    momentum_head = np.nanmean(solver.history_momentum_head, axis=0)
-    ffr = momentum_head / momentum_head[78]
+    q_mean = np.nanmean(solver.history_flow, axis=0)
+    ffr = q_mean / par.mean_coronary_flow_ml_s()
     return ffr
 
 if __name__ == "__main__":
