@@ -81,7 +81,7 @@ def area_from_lumen_pressure_mmhg(
     b = np.asarray(beta, dtype=float)
     p = np.asarray(pressure, dtype=float)
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
-    return np.maximum(sqrt_a**2, 0.1 * a0)
+    return np.maximum(sqrt_a**2, 0.8 * a0)
 
 
 def stenosis_loss_k_total(area_scale: float) -> float:
@@ -232,17 +232,17 @@ class BloodFlowParameters:
     rho: float = 1.06  # 血液密度 (g/cm³)
     alpha: float = 1.1  # 动量修正系数（层流常取 1.1）
     mu: float = 0.0035  # 血液粘度 (cm²/s)
-    cfl: float = 1.0  # 数值稳定性参数 CFL
+    cfl: float = 0.5  # 数值稳定性参数 CFL
     dt_max_s: float = 5e-4  # 时间步上限 (s)
 
     # 管壁相关 tube law
-    p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 3250  # 默认β，越大表示管腔越硬（管壁刚度）
+    p_ref_mmhg: float = 25 * 2.5  # tube law 参考压 (mmHg)
+    beta_mmhg_per_sqrt_cm: float = 1500  # 默认β，越大表示管腔越硬（管壁刚度）
     stenosis_loss_coefficient: float = 1.0  # 狭窄形阻系数 K 的全局标定因子
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
-    cardiac_output_l_per_min: float = 5.0  # 心脏输出量 (L/min)
+    cardiac_output_l_per_min: float = 5.5  # 心脏输出量 (L/min)
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
     inlet_min_flow_fraction: float = 0.1  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
@@ -342,8 +342,8 @@ class _OutletWindkesselState:
         """完整时间步末：推进 C·dP_wk/dt = Q_drive − P_wk/R_d。"""
         if dt <= 0.0:
             return self.apply_substep(q_lumen, q_inlet)
-        q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
-        # q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
+        # q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
+        q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
         self.p_wk += (dt / self.c) * (
             q_drive - self.p_wk / max(self.r_d, 1e-9)
         )
@@ -461,10 +461,15 @@ class NavierStokes1D:
                 k_total = loss_scale * stenosis_loss_k_total(a_scale)
                 self.stenosis_loss_k[mask] = k_total / lesion_length
 
+        # 设置初值
+        q_mean = self.paras.mean_coronary_flow_ml_s()
+        r_d, _ = self.paras.resolve_outlet_resistances()
+
         self.state[0] = self.area_ref.copy()
-        self.state[1] = 0.0
+        self.state[1] = q_mean
         self._update_pressure()  # 管腔各处压力初始值
-        self.outlet.reset(p_wk=float(self.pressure[-1]))  # 出口压力初始值
+        # # Windkessel 初值用稳态标定，而非 tube law 的 P_ref
+        self.outlet.reset(p_wk=float(q_mean * r_d))  # 出口压力初始值
 
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
         u = self.state if state is None else state
@@ -557,7 +562,7 @@ class NavierStokes1D:
     @staticmethod
     def _clip_area(state: np.ndarray, area_ref: np.ndarray) -> np.ndarray:
         u = state.copy()
-        u[0] = np.maximum(u[0], 0.1 * area_ref)
+        u[0] = np.maximum(u[0], 0.8 * area_ref)
         return u
 
     def _stable_timestep(self, state: np.ndarray) -> float:
@@ -701,15 +706,15 @@ class NavierStokes1D:
 
         ax = axes[0, 1]
         q_mean = np.mean(self.history_flow[1500:, :], axis=0)
-        ax.plot(xx, q_mean, "g-", lw=1.8, label="p tube law")
-        ax.set(xlabel="x (cm)", ylabel="mmHg", title="沿程流量（时间平均）")
+        ax.plot(xx, q_mean, "g-", lw=1.8, label="Q")
+        ax.set(xlabel="x (cm)", ylabel="Q (cm³/s)", title="沿程流量（时间平均）")
         ax.legend(loc="best", fontsize=9)
         ax.grid(True, alpha=0.3)
 
         ax = axes[1, 0]
-        ax.plot(tt, self.history_pressure[:, 300], "r-", lw=1.5, label="x=300 p")
-        ax.plot(tt, self.history_pressure[:, 10], "b-", lw=1.5, label="x=10 p")
-        ax.set(xlabel="t (s)", ylabel="p(mmHg)", title="x = 10(blue) / 300(red)")
+        ax.plot(tt, self.history_pressure[:, 348], "r-", lw=1.5, label="x=348")
+        ax.plot(tt, self.history_pressure[:, 0], "b-", lw=1.5, label="x=0")
+        ax.set(xlabel="t (s)", ylabel="p(mmHg)", title="x = 0(blue) / 300(red)")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=9)
 
@@ -731,12 +736,13 @@ class NavierStokes1D:
 def _demo():
     from scipy.ndimage import gaussian_filter1d
     np.random.seed(569)
-    sigma_nodes = 2.0   # 按网格点，2–5 试起
+    sigma_nodes = 5.0   # 按网格点，2–5 试起
     pullback_speed = 36  # mm/s
     frames_per_s = 200 # fps
     pullback_time = 2  # s
     # nx = int(pullback_time * frames_per_s)
     length = pullback_speed * pullback_time / 10  # cm
+    
     duration_s = 3  # s
     area_file = np.load('area.npy')
     area = area_file[::-1] / 100
@@ -746,15 +752,15 @@ def _demo():
     # area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
     print(nx, length)
 
-    # lesions = [(3, 4, 0.95, 10), (7, 8, 0.95, 10)]
-    lesions = None
+    lesions = [(2.5, 3.5, 1, 2), (5, 6, 1, 2)]
+    # lesions = None
 
     par = BloodFlowParameters()
     solver = NavierStokes1D(length, nx, par)
     solver.set_lumen_area_profile(
         area_smooth,
         x=x,
-        lesions=lesions,
+        lesions=lesions
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results()

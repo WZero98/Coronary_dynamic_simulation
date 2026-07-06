@@ -304,7 +304,156 @@ A_out  ← tube law 反解，使 p(A_out) = P_lumen
 
 ### 5.3 物理下限
 
-每步将 \(A\) 限制为不低于 `0.1 * area_ref`，避免除零与非物理负面积。
+每步将 \(A\) 限制为不低于 `0.8 * area_ref`（`_clip_area`）；MUSCL 重构阶段另有 `0.1 * area_ref` 下限，避免除零与非物理负面积。
+
+### 5.4 边界变量 vs 内部自由度（示意图）
+
+有限体积离散在单元中心存储 \(U_j=[A_j,Q_j]^\mathsf{T}\)。边界条件**不直接修改通量公式**，而是在每个 RK 子步先强制边界节点上的 \(U\)，再由 `_spatial_operator` 用边界上的物理通量 \(F(U)\) 作为 `f_face[0]`、`f_face[-1]`。
+
+#### 5.4.1 沿程：prescribed / free / derived
+
+```mermaid
+flowchart LR
+    subgraph IN["入口 x = 0"]
+        direction TB
+        IN_Q["Q₀ = Q_in(t)  ✓ prescribed"]
+        IN_A["A₀ = A₁       ~ extrapolated"]
+        IN_P["p₀ = tube_law(A₀)  derived"]
+    end
+
+    subgraph INT["内部 j = 1 … nx−2"]
+        direction TB
+        INT_A["A_j  ✓ free"]
+        INT_Q["Q_j  ✓ free"]
+        INT_P["p_j = tube_law(A_j)  derived"]
+    end
+
+    subgraph OUT["出口 x = L"]
+        direction TB
+        WK["P_wk  ✓ ODE state"]
+        OUT_P["P_lumen = f(P_wk, Q_drive)  ✓ prescribed"]
+        OUT_Q["Q_out = P_wk / R_d  ✓ prescribed"]
+        OUT_A["A_out = inv_tube_law(P_lumen)  derived"]
+    end
+
+    IN -->|"HLL 通量传播"| INT
+    INT -->|"HLL 通量传播"| OUT
+```
+
+**图例**
+
+| 标记 | 含义 |
+|------|------|
+| prescribed（图中红色节点） | 边界**直接强制**的变量 |
+| free（图中绿色节点） | **内部自由度**，由 PDE 时间推进 |
+| derived（图中紫色节点） | **派生量**：每步由 tube law 从 \(A\) 算出，不单独求解 |
+| extrapolated / ODE state（图中黄色节点） | \(A_0\) 外推、或 Windkessel 状态 \(P_{\mathrm{wk}}\) |
+
+#### 5.4.2 1D 管段上的变量角色
+
+```text
+  入口 x=0              内部单元 j=1…nx−2              出口 x=L
+  ─────────            ─────────────────────           ─────────
+       │                        │                          │
+  Q ───●─── prescribed          ○─── free                   ●─── prescribed
+       │    Q_in(t)             │   evolve by              │   P_wk/R_d
+       │                        │   −∂F/∂x+S               │
+  A ───○─── extrapolated        ○─── free                   ○─── derived
+       │    A₀=A₁               │                          │   from P_lumen
+       │                        │                          │
+  p ───◇─── derived             ◇─── derived                ◇─── drives A_out
+       │    tube law            │   tube law               │   via inv tube law
+       │                        │                          │
+       │                        │                    P_wk ──●── ODE state
+       │                        │                          │   C·dP_wk/dt =
+       │                        │                          │   Q_drive−P_wk/Rd
+       ▼                        ▼                          ▼
+   F(U₀) 边界通量          F̂_{j+1/2} HLL 内通量         F(U_{n−1}) 边界通量
+```
+
+符号：`●` prescribed，`○` free，`◇` derived。
+
+#### 5.4.3 守恒变量 **U = [A, Q]** 的约束一览
+
+| 位置 | \(A\) | \(Q\) | \(p\) | 决定方式 |
+|------|-------|-------|-------|----------|
+| **入口** \(j=0\) | 外推 \(A_1\) | **\(Q_{\mathrm{in}}(t)\)** | tube law | `_apply_boundaries` |
+| **内部** \(j=1…n{-}2\) | **自由** | **自由** | tube law | SSP-RK2 + HLL + 源项 |
+| **出口** \(j=n{-}1\) | **反解**（配 \(P_{\mathrm{lumen}}\)） | **\(P_{\mathrm{wk}}/R_d\)** | **\(P_{\mathrm{lumen}}\)** | Windkessel + `_apply_boundaries` |
+
+**内部自由度总数**：\(2(n_x - 2)\)（每个内部点的 \(A_j,\,Q_j\) 各 1 个）。边界各占用 2 个分量，但并非 4 个独立自由变量——入口主要约束 \(Q\)，出口主要经 Windkessel 约束 \(P/Q\)。
+
+#### 5.4.4 出口 Windkessel 与管腔的耦合
+
+```mermaid
+flowchart TB
+    QIN["Q_in(t) 入口"]
+    QLO["Q_lumen = U[1,-1] 出口管腔"]
+    QDRV["Q_drive = ½(Q_in + Q_lumen)"]
+    ODE["C · dP_wk/dt = Q_drive − P_wk/R_d"]
+    PWK["P_wk"]
+    PLUM["P_lumen = P_wk + Rp·Q_drive  (3wk)"]
+    QOUT["Q_out = P_wk / R_d"]
+    AOUT["A_out = area_from_lumen_pressure(P_lumen)"]
+
+    QIN --> QDRV
+    QLO --> QDRV
+    QDRV --> ODE
+    ODE --> PWK
+    PWK --> PLUM
+    PWK --> QOUT
+    PLUM --> AOUT
+    QOUT --> UOUT["U[-1] = [A_out, Q_out]"]
+    AOUT --> UOUT
+    UOUT --> QLO
+```
+
+\(Q_{\mathrm{lumen,out}}\) 既是内部演化结果，又经 \(Q_{\mathrm{drive}}\) 反馈到 Windkessel ODE，形成**边界–内部耦合环**。
+
+#### 5.4.5 一个 SSP-RK2 步内边界何时介入
+
+与 §4.2 一致：Windkessel 状态 \(P_{\mathrm{wk}}\) **仅在完整步末**（`advance_outlet=True`）积分；RK 中间子步只 `apply_substep`，\(P_{\mathrm{wk}}\) 冻结。
+
+```mermaid
+sequenceDiagram
+    participant S as state U^n
+    participant BC as _apply_boundaries
+    participant L as _spatial_operator
+    participant WK as Windkessel
+
+    Note over S,WK: 子步 1
+    S->>BC: BC(state, advance=False)
+    Note right of BC: 入口 Q_in<br/>出口 Q_out=P_wk/Rd<br/>P_wk 不积分
+    BC->>L: u0
+    L->>L: k0 = −∂F/∂x + S
+    L->>BC: u1 = clip(u0 + dt·k0)
+    BC->>BC: BC(u1, advance=False)
+
+    Note over S,WK: 子步 2（步末）
+    L->>L: k1 from u1
+    L->>BC: state* = 0.5·u0 + 0.5·(u1+dt·k1)
+    BC->>WK: advance(dt, Q_lumen, Q_in)
+    Note right of WK: 仅此处更新 P_wk
+    WK->>BC: Q_out, P_lumen
+    BC->>S: state^{n+1}
+```
+
+#### 5.4.6 快速记忆
+
+```text
+        prescribed          free              prescribed
+           │                  │                    │
+    Q_in ──┤                  │              P_wk/R_d ── Q_out
+           │                  │                    │
+           │            A_j, Q_j  evolve            │
+           │                  │                    │
+    A←A₁ ──┤                  │         P_lumen ──→ A_out
+           │                  │                    │
+           └────── 双曲 PDE + 源项 传播 ──────────┘
+                         tube law → p_j  everywhere
+```
+
+**一句话**：入口像**脉动流量泵**（只推 \(Q\)），出口像**带顺应性的微循环储器**（用 \(P_{\mathrm{wk}}\) 与 \(R_d\) 控制出流和远端压力）；二者经管内双曲 PDE 耦合，tube law 把面积变化转为各点显示压力 \(p_j\)。
 
 ---
 
