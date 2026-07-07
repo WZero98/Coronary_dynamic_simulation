@@ -212,8 +212,10 @@ P_{\mathrm{lumen}} = P_{\mathrm{wk}} + R_p\, Q_{\mathrm{drive}}
 其中：
 
 \[
-Q_{\mathrm{drive}} = \tfrac{1}{2}\bigl(Q_{\mathrm{in}} + Q_{\mathrm{lumen,out}}\bigr)
+Q_{\mathrm{drive}} = Q_{\mathrm{lumen,out}}
 \]
+
+（取末端管腔流量，强调管腔–微循环质量守恒；代码中保留 `(Q_in + Q_lumen)/2` 的注释备选。）
 
 出口边界施加：
 
@@ -309,16 +311,14 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    QIN["Q_in(t) 入口"]
     QLO["Q_lumen = U[1,-1] 出口管腔"]
-    QDRV["Q_drive = ½(Q_in + Q_lumen)"]
+    QDRV["Q_drive = Q_lumen"]
     ODE["C · dP_wk/dt = Q_drive − P_wk/R_d"]
     PWK["P_wk"]
     PLUM["P_lumen = P_wk + Rp·Q_drive  (3wk)"]
     QOUT["Q_out = P_wk / R_d"]
     AOUT["A_out = area_from_lumen_pressure(P_lumen)"]
 
-    QIN --> QDRV
     QLO --> QDRV
     QDRV --> ODE
     ODE --> PWK
@@ -376,6 +376,36 @@ sequenceDiagram
 ```
 
 **一句话**：入口像**脉动流量泵**（只推 \(Q\)），出口像**带顺应性的微循环储器**（用 \(P_{\mathrm{wk}}\) 与 \(R_d\) 控制出流和远端压力）；二者经管内双曲 PDE 耦合，tube law 把面积变化转为各点显示压力 \(p_j\)。
+
+### 5.5 初值与模块耦合
+
+`set_lumen_area_profile` 在设置 \(A_0(x)\) 后**同步初始化** PDE 状态与出口 Windkessel，使各模块在 \(t=0\) 自洽：
+
+| 量 | 初值 | 依据 |
+|----|------|------|
+| \(A(x,0)\) | \(A_0(x)\) | tube law → \(p \approx P_{\mathrm{ref}}\) |
+| \(Q(x,0)\) | \(Q_{\mathrm{in}}(0)\) | 与入口定流量 BC 一致（**非** \(Q_{\mathrm{mean}}\)） |
+| \(P_{\mathrm{wk}}(0)\) | \(Q_{\mathrm{mean}}\, R_d = P_{\mathrm{ref}}\) | Windkessel 稳态标定 |
+| \(P_{\mathrm{lumen}}(0)\)（3wk） | \(P_{\mathrm{wk}} + R_p\, Q_{\mathrm{in}}(0)\) | `outlet.reset(q_drive=…)` |
+
+**参数标定链**（默认自动，勿拆开改）：
+
+```text
+CO, coronary_fraction  →  Q_mean
+P_ref (tube law)       →  R_d = P_ref / Q_mean
+outlet_proximal_fraction  →  R_p = fraction · R_d
+```
+
+稳态对齐关系：当 \(A=A_0\)、\(Q=Q_{\mathrm{mean}}\) 时，tube law 给出 \(p=P_{\mathrm{ref}}\)，Windkessel 给出 \(P_{\mathrm{wk}}=P_{\mathrm{ref}}\)。
+
+**`_OutletWindkesselState.reset(p_wk=None, q_drive=None)`**
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `p_wk` | `Q_mean · R_d` | 顺应性节点压 |
+| `q_drive` | `Q_in(0)` | 三元模型计算 \(P_{\mathrm{lumen}}=P_{\mathrm{wk}}+R_p Q_{\mathrm{drive}}\) |
+
+建议 `duration_s` 取 ≥2–3 个心动周期再统计；若需进一步减小启动瞬态，可离线预积分 Windkessel 取周期末 \(P_{\mathrm{wk}}\) 传入 `reset(p_wk=…)`（见 §11）。
 
 ---
 
@@ -444,9 +474,9 @@ solver.set_lumen_area_profile(
 
 调用后会：
 
-- 将 `state[0] = A₀`，`state[1] = 0`（静止初值）
-- 更新 `pressure`
-- 重置出口 Windkessel 初值
+- 将 `state[0] = A₀(x)`，`state[1] = Q_in(0)`（与入口 BC 一致，非静止初值）
+- 由 tube law 更新 `pressure`（\(A=A_0\) 时 \(p \approx P_{\mathrm{ref}}\)）
+- 调用 `outlet.reset(p_wk=Q_mean·R_d, q_drive=Q_in(0))` 重置 Windkessel；三元模型含 \(R_p Q_{\mathrm{in}}(0)\) 项
 
 ### 7.2 由半径构造面积
 
@@ -645,7 +675,7 @@ p_ref = NavierStokes1D.reference_outlet_pressure(t, par)
 | 更高空间精度 | 增大 `n_nodes`；略减小 `cfl`（如 0.35–0.45） |
 | 加快计算 | 减小 `n_nodes` 或 `duration_s`；增大 `record_interval_steps` |
 | 不稳定 / 振荡 | 减小 `cfl`；检查 \(\beta\) 是否过大；确认单位一致 |
-| 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s） |
+| 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s）；初值已用 \(Q_{\mathrm{in}}(0)\) 与稳态 \(P_{\mathrm{wk}}\)，启动瞬态较旧版 \(Q=0\) 更短 |
 | 更重狭窄 | 适当增大狭窄段 `beta_scale`；必要时加密网格 |
 
 计算量：每步 2 次空间算子（SSP-RK2），复杂度 \(O(n_x)\)。`nx=121`, `T=2` s 时通常为 \(10^4\) 量级步数，普通 PC 上数十秒量级。
@@ -658,7 +688,7 @@ p_ref = NavierStokes1D.reference_outlet_pressure(t, par)
 2. 出口为 **Windkessel–tube law 耦合**，非特征非反射边界；与纯 prescribed \(P(t)\) 或纯 \(Q\) 外推不同。
 3. 摩擦为线性 Poiseuille，未含湍流、弯曲损失等。
 4. **FFR** 为简化压比，非临床标准。
-5. 初值为 \(A=A_0, Q=0\)，需数个周期达到周期性解。
+5. 初值为 \(A=A_0,\; Q=Q_{\mathrm{in}}(0)\)，\(P_{\mathrm{wk}}=P_{\mathrm{ref}}\)；脉动工况下仍建议 ≥2 个心动周期再取统计量。
 
 扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像中心线半径 CSV 转为 `set_lumen_area_profile` 输入；多支血管可在外层循环或多段拼接。
 
@@ -686,6 +716,9 @@ A：设置 `MPLBACKEND=Agg`，在 `plot_results()` 后增加 `fig.savefig("resul
 
 **Q：`set_lumen_area_profile` 与 `lesions` 顺序？**  
 A：先插值 `area`/`beta` 到网格，再对 `lesions` 区间做乘法修正。
+
+**Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
+A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 仍用 \(Q_{\mathrm{mean}} R_d\) 稳态标定，与 tube law 的 \(P_{\mathrm{ref}}\) 对齐。
 
 ---
 

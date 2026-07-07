@@ -26,7 +26,17 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 - 入口：coronary_inlet.coronary_inlet_flow 提供生理脉动入口流量 Q_in(t)（mL/s ≡ cm³/s）
 - 出口：coronary_outlet 中 Windkessel 模型提供出口管腔压；求解过程中按
         C·dP_wk/dt = Q_drive − P_wk/R_d 推进微循环状态（与 windkessel2/3 一致），
-        再由 tube law 确定出口 A，流量与管腔/微循环闭合
+        Q_drive 取末端管腔流量 Q(L)；再由 tube law 确定出口 A，流量与管腔/微循环闭合
+
+初值与模块耦合（set_lumen_area_profile）
+----------------------------------------
+设置 A₀(x) 后同步初始化，使 tube law、入口 BC 与 Windkessel 在 t=0 自洽：
+- A(x,0) = A₀(x)  →  tube law 得 p(x,0) ≈ P_ref
+- Q(x,0) = Q_in(0)  →  与入口定流量 BC 一致（非 Q_mean）
+- P_wk(0) = Q_mean·R_d = P_ref  →  R_d = P_ref/Q_mean 稳态标定
+- 三元模型：P_lumen(0) = P_wk + R_p·Q_in(0)（outlet.reset 的 q_drive）
+
+参数链：CO、coronary_fraction → Q_mean → R_d = P_ref/Q_mean，与 tube law 锚点 P_ref 对齐。
 
 空间离散：单元中心有限体积法 + MUSCL 线性重构 + minmod TVD 限制器 + HLL 数值通量
 时间离散：SSP-RK2（二阶强稳定保持 Runge-Kutta）
@@ -282,10 +292,23 @@ class _OutletWindkesselState:
             self.r_p * q_mean if self.is_three_element else 0.0
         )
 
-    def reset(self, p_wk: float | None = None):
-        if p_wk is not None:
-            self.p_wk = float(p_wk)
-        self.p_lumen = self.p_wk
+    def reset(
+        self,
+        p_wk: float | None = None,
+        q_drive: float | None = None,
+    ) -> None:
+        """重置出口 Windkessel；P_wk 默认稳态标定，三元模型 P_lumen 用 q_drive。"""
+        q_mean = self.params.mean_coronary_flow_ml_s()
+        if q_drive is None:
+            q_drive = float(
+                np.asarray(self.params.inlet_flow(0.0)).reshape(-1)[0]
+            )
+        else:
+            q_drive = float(q_drive)
+        self.p_wk = q_mean * self.r_d if p_wk is None else float(p_wk)
+        self.p_lumen = (
+            self.p_wk + self.r_p * q_drive if self.is_three_element else self.p_wk
+        )
 
     def lumen_pressure(self, q_drive: float) -> float:
         if self.is_three_element:
@@ -382,6 +405,13 @@ class NavierStokes1D:
             弹性系数 β(x) (mmHg/√cm)
         lesions : optional
             狭窄列表 [(x_start, x_end, area_scale, beta_scale), ...]
+
+        Notes
+        -----
+        调用后同步设置 PDE 初值与出口 Windkessel 状态：
+        - ``state[0] = A₀(x)``，``state[1] = Q_in(0)``
+        - ``P_wk(0) = Q_mean·R_d``（稳态标定，等于 ``P_ref``）
+        - 三元模型经 ``outlet.reset(q_drive=Q_in(0))`` 设 ``P_lumen(0) = P_wk + R_p·Q_in(0)``
         """
         area = np.asarray(area, dtype=float)
         if area.size < 2:
@@ -418,15 +448,15 @@ class NavierStokes1D:
                 self.area_ref[mask] *= a_scale
                 self.beta[mask] *= b_scale
 
-        # 设置初值
+        # 初值：A=A₀ → p≈P_ref；Q=Q_in(0) 与入口 BC 一致；P_wk 稳态标定
+        q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
         q_mean = self.paras.mean_coronary_flow_ml_s()
         r_d, _ = self.paras.resolve_outlet_resistances()
 
         self.state[0] = self.area_ref.copy()
-        self.state[1] = q_mean
-        self._update_pressure()  # 管腔各处压力初始值
-        # # Windkessel 初值用稳态标定，而非 tube law 的 P_ref
-        self.outlet.reset(p_wk=float(q_mean * r_d))  # 出口压力初始值
+        self.state[1] = q0
+        self._update_pressure()
+        self.outlet.reset(p_wk=q_mean * r_d, q_drive=q0)
 
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
         u = self.state if state is None else state
@@ -836,7 +866,7 @@ def _demo():
     length = pullback_speed * pullback_time / 10  # cm
     
     duration_s = 3  # s
-    area_file = np.load('area_1.npy')
+    area_file = np.load('area_2.npy')
     area = area_file[::-1] / 100
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area.shape[0]
