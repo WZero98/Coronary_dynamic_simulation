@@ -499,7 +499,7 @@ def plot_coronary_outlet_pressure(
 if __name__ == "__main__":
     hr, co, frac = 75.0, 5.0, 0.03
     duration_s = 30
-    r_d = 30
+    r_d = None
     # rp, rd 可根据提供的流量进行估算，也可以直接给出
     t = np.linspace(0.0, duration_s, int(800 * duration_s))
 
