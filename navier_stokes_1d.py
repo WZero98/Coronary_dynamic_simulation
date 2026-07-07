@@ -10,9 +10,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 
     F₀ = Q
     F₁ = α·Q²/A + p_mmHg(A)·A/ρ*
-    S  = [0, −8πμ·Q/A − K(x)·ρ·Q|Q|/(2A·ρ*)]ᵀ
-
-    狭窄段 K(x) > 0：基于 Bernoulli 型局部形阻（见 docs/navier_stokes_1d.md §3.4）。
+    S  = [0, −8πμ·Q/A]ᵀ
 
     ρ* = ρ / (1333.22 g·cm⁻¹·s⁻² per mmHg)，在 BloodFlowParameters 中一次性标定；
     与逐点把 p 换成 dyne/cm² 再代入原式等价。
@@ -28,7 +26,17 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 - 入口：coronary_inlet.coronary_inlet_flow 提供生理脉动入口流量 Q_in(t)（mL/s ≡ cm³/s）
 - 出口：coronary_outlet 中 Windkessel 模型提供出口管腔压；求解过程中按
         C·dP_wk/dt = Q_drive − P_wk/R_d 推进微循环状态（与 windkessel2/3 一致），
-        再由 tube law 确定出口 A，流量与管腔/微循环闭合
+        Q_drive 取末端管腔流量 Q(L)；再由 tube law 确定出口 A，流量与管腔/微循环闭合
+
+初值与模块耦合（set_lumen_area_profile）
+----------------------------------------
+设置 A₀(x) 后同步初始化，使 tube law、入口 BC 与 Windkessel 在 t=0 自洽：
+- A(x,0) = A₀(x)  →  tube law 得 p(x,0) ≈ P_ref
+- Q(x,0) = Q_in(0)  →  与入口定流量 BC 一致（非 Q_mean）
+- P_wk(0) = Q_mean·R_d = P_ref  →  R_d = P_ref/Q_mean 稳态标定
+- 三元模型：P_lumen(0) = P_wk + R_p·Q_in(0)（outlet.reset 的 q_drive）
+
+参数链：CO、coronary_fraction → Q_mean → R_d = P_ref/Q_mean，与 tube law 锚点 P_ref 对齐。
 
 空间离散：单元中心有限体积法 + MUSCL 线性重构 + minmod TVD 限制器 + HLL 数值通量
 时间离散：SSP-RK2（二阶强稳定保持 Runge-Kutta）
@@ -81,40 +89,7 @@ def area_from_lumen_pressure_mmhg(
     b = np.asarray(beta, dtype=float)
     p = np.asarray(pressure, dtype=float)
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
-    return np.maximum(sqrt_a**2, 0.8 * a0)
-
-
-def stenosis_loss_k_total(area_scale: float) -> float:
-    """
-    由狭窄几何比估算总形阻系数 K（无量纲）。
-
-    基于收缩断面处速度头损失 Δp = K·ρv²/2，取 K ≈ (A_prox/A_sten − 1)²，
-    其中 A_sten/A_prox = area_scale（lesions 中对 A₀ 的缩放因子）。
-    """
-    scale = float(np.clip(area_scale, 1e-3, 1.0))
-    return float((1.0 / scale - 1.0) ** 2)
-
-
-def stenosis_form_loss_source(
-    flow: np.ndarray,
-    area: np.ndarray,
-    loss_k_per_cm: np.ndarray,
-    rho_g_per_cm3: float,
-    rho_mmhg: float,
-) -> np.ndarray:
-    """
-    狭窄区形阻动量源项（与 Poiseuille 摩擦并列加入 S₁）。
-
-    将总损失 Δp = K_total·ρv²/2 沿狭窄段长度 L 均布：
-        (dp_loss/dx) = K_total·ρ·(Q/A)² / (2L)
-    等价动量源（与 tube-law / mmHg 动量通量同一 ρ* 标定）：
-        S_sten = −(A/ρ*)·(dp_loss/dx) = −K(x)·ρ·Q|Q| / (2A·ρ*)
-    其中 K(x) = K_total / L（单位 1/cm）。
-    """
-    a = np.maximum(np.asarray(area, dtype=float), 1e-12)
-    q = np.asarray(flow, dtype=float)
-    k = np.asarray(loss_k_per_cm, dtype=float)
-    return -k * rho_g_per_cm3 * np.abs(q) * q / (2.0 * a * rho_mmhg)
+    return np.maximum(sqrt_a**2, 0.1 * a0)
 
 
 # ---------------------------------------------------------------------------
@@ -236,9 +211,8 @@ class BloodFlowParameters:
     dt_max_s: float = 5e-4  # 时间步上限 (s)
 
     # 管壁相关 tube law
-    p_ref_mmhg: float = 30 * 2.5  # tube law 参考压 (mmHg) R_d * Q_mean
-    beta_mmhg_per_sqrt_cm: float = 1500  # 默认β，越大表示管腔越硬（管壁刚度）
-    stenosis_loss_coefficient: float = 1.0  # 狭窄形阻系数 K 的全局标定因子
+    p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
+    beta_mmhg_per_sqrt_cm: float = 750.0  # 默认β，越大表示管腔越硬（管壁刚度）
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
@@ -318,10 +292,23 @@ class _OutletWindkesselState:
             self.r_p * q_mean if self.is_three_element else 0.0
         )
 
-    def reset(self, p_wk: float | None = None):
-        if p_wk is not None:
-            self.p_wk = float(p_wk)
-        self.p_lumen = self.p_wk
+    def reset(
+        self,
+        p_wk: float | None = None,
+        q_drive: float | None = None,
+    ) -> None:
+        """重置出口 Windkessel；P_wk 默认稳态标定，三元模型 P_lumen 用 q_drive。"""
+        q_mean = self.params.mean_coronary_flow_ml_s()
+        if q_drive is None:
+            q_drive = float(
+                np.asarray(self.params.inlet_flow(0.0)).reshape(-1)[0]
+            )
+        else:
+            q_drive = float(q_drive)
+        self.p_wk = q_mean * self.r_d if p_wk is None else float(p_wk)
+        self.p_lumen = (
+            self.p_wk + self.r_p * q_drive if self.is_three_element else self.p_wk
+        )
 
     def lumen_pressure(self, q_drive: float) -> float:
         if self.is_three_element:
@@ -386,7 +373,6 @@ class NavierStokes1D:
 
         self.area_ref = np.full(self.nx, 0.5)  # TODO 需修改为管腔分割后计算出的管腔截面积
         self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)  # TODO 识别到斑块处，弹性降低，β越大
-        self.stenosis_loss_k = np.zeros(self.nx)  # 狭窄形阻强度 K(x)，单位 1/cm
         self.state = np.zeros((2, self.nx))  # U = [A(x, t), Q(x, t)] 状态变量
         self.pressure = np.zeros(self.nx)  # P(x, t) 管腔壁所受侧压力
 
@@ -418,8 +404,14 @@ class NavierStokes1D:
         beta : ndarray or float, optional
             弹性系数 β(x) (mmHg/√cm)
         lesions : optional
-            狭窄列表 [(x_start, x_end, area_scale, beta_scale), ...]；
-            同时按 §docs/navier_stokes_1d.md 填充 stenosis_loss_k 形阻场
+            狭窄列表 [(x_start, x_end, area_scale, beta_scale), ...]
+
+        Notes
+        -----
+        调用后同步设置 PDE 初值与出口 Windkessel 状态：
+        - ``state[0] = A₀(x)``，``state[1] = Q_in(0)``
+        - ``P_wk(0) = Q_mean·R_d``（稳态标定，等于 ``P_ref``）
+        - 三元模型经 ``outlet.reset(q_drive=Q_in(0))`` 设 ``P_lumen(0) = P_wk + R_p·Q_in(0)``
         """
         area = np.asarray(area, dtype=float)
         if area.size < 2:
@@ -450,26 +442,21 @@ class NavierStokes1D:
             bx = x if beta.size == area.size else self.x
             self.beta = np.interp(self.x, bx, beta)
 
-        self.stenosis_loss_k = np.zeros(self.nx)
         if lesions:
-            loss_scale = self.paras.stenosis_loss_coefficient
             for x0, x1, a_scale, b_scale in lesions:
                 mask = (self.x >= x0) & (self.x <= x1)
                 self.area_ref[mask] *= a_scale
                 self.beta[mask] *= b_scale
-                lesion_length = max(float(x1) - float(x0), self.dx)
-                k_total = loss_scale * stenosis_loss_k_total(a_scale)
-                self.stenosis_loss_k[mask] = k_total / lesion_length
 
-        # 设置初值
+        # 初值：A=A₀ → p≈P_ref；Q=Q_in(0) 与入口 BC 一致；P_wk 稳态标定
+        q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
         q_mean = self.paras.mean_coronary_flow_ml_s()
         r_d, _ = self.paras.resolve_outlet_resistances()
 
         self.state[0] = self.area_ref.copy()
-        self.state[1] = q_mean
-        self._update_pressure()  # 管腔各处压力初始值
-        # # Windkessel 初值用稳态标定，而非 tube law 的 P_ref
-        self.outlet.reset(p_wk=float(q_mean * r_d))  # 出口压力初始值
+        self.state[1] = q0
+        self._update_pressure()
+        self.outlet.reset(p_wk=q_mean * r_d, q_drive=q0)
 
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
         u = self.state if state is None else state
@@ -524,14 +511,6 @@ class NavierStokes1D:
         dudt = -(f_face[:, 1:] - f_face[:, :-1]) / self.dx
         a = np.maximum(state[0], 1e-12)
         dudt[1] -= 8.0 * np.pi * self.paras.mu * state[1] / a
-        if np.any(self.stenosis_loss_k > 0.0):
-            dudt[1] += stenosis_form_loss_source(
-                state[1],
-                a,
-                self.stenosis_loss_k,
-                self.paras.rho,
-                rho_star,
-            )
         return dudt
 
     def _apply_boundaries(
@@ -887,7 +866,7 @@ def _demo():
     length = pullback_speed * pullback_time / 10  # cm
     
     duration_s = 3  # s
-    area_file = np.load('area_1.npy')
+    area_file = np.load('area_2.npy')
     area = area_file[::-1] / 100
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area.shape[0]

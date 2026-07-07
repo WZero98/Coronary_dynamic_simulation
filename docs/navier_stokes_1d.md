@@ -30,7 +30,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| 控制方程 | 1D 守恒型 Navier-Stokes（Poiseuille 摩擦 + 狭窄 Bernoulli 形阻源项） |
+| 控制方程 | 1D 守恒型 Navier-Stokes（含 Poiseuille 摩擦源项） |
 | 管壁 | \(p = P_{\mathrm{ref}} + \beta(\sqrt{A}-\sqrt{A_0})\) |
 | 空间离散 | 有限体积 + MUSCL + minmod TVD + HLL |
 | 时间离散 | SSP-RK2 |
@@ -82,7 +82,7 @@ U = \begin{bmatrix} A \\ Q \end{bmatrix}
 \[
 F = \begin{bmatrix} Q \\ \dfrac{\alpha Q^2}{A} + \dfrac{p(A)\,A}{\rho} \end{bmatrix},
 \quad
-S = \begin{bmatrix} 0 \\ -\dfrac{8\pi\mu Q}{A} - \dfrac{K(x)\,\rho\,Q|Q|}{2A\,\rho^*} \end{bmatrix}
+S = \begin{bmatrix} 0 \\ -\dfrac{8\pi\mu Q}{A} \end{bmatrix}
 \]
 
 | 符号 | 含义 |
@@ -92,9 +92,7 @@ S = \begin{bmatrix} 0 \\ -\dfrac{8\pi\mu Q}{A} - \dfrac{K(x)\,\rho\,Q|Q|}{2A\,\r
 | \(\rho\) | 血液密度 |
 | \(\alpha\) | 动量修正系数（层流常取 1.1） |
 | \(\mu\) | 运动粘度 |
-| \(\rho^*\) | 与 mmHg 制管腔压配对的动量有效密度，\(\rho^*=\rho/\mathrm{MMHG\_TO\_DYNE}\) |
 | 摩擦项 | Poiseuille 型 \(-8\pi\mu Q/A\) |
-| 狭窄形阻项 | 见 [§3.4](#34-狭窄区形阻损失项)；\(K(x)=0\) 于非狭窄段 |
 
 通量中的 \(p(A)\) 在计算动量项时由 **mmHg 换算为 cgs（dyne/cm²）**，系数见 `coronary_constants.MMHG_TO_DYNE_PER_CM2`（1333.22）。
 
@@ -130,82 +128,6 @@ c(A) = \sqrt{\frac{2\beta\sqrt{A}}{\rho}}
 | 粘度 \(\mu\) | cm²/s |
 | 压力 \(p\)（存储与绘图） | mmHg |
 | 时间 \(t\) | s |
-
-### 3.4 狭窄区形阻损失项
-
-#### 3.4.1 物理依据
-
-一维可变形管模型中，管壁弹性律 \(p(A,x)\) 给出的是**局部截面积相对参考几何的弹性响应**，本身不包含狭窄处的**不可逆动能损失**。临床上 FFR 所关心的“过狭窄后的净压降”，很大一部分来自该损失，而非 Poiseuille 沿程摩擦（冠脉长度尺度上后者通常仅约 \(10^{-2}\) mmHg 量级）。
-
-对定常、不可压缩、沿一条流线应用 **Bernoulli 方程**（含局部损失项）：
-
-\[
-p_{\mathrm{prox}} + \frac{1}{2}\rho v_{\mathrm{prox}}^2
-= p_{\mathrm{dist}} + \frac{1}{2}\rho v_{\mathrm{dist}}^2 + \Delta p_{\mathrm{loss}},
-\qquad
-v = \frac{Q}{A}.
-\]
-
-质量守恒 \(Q = A_{\mathrm{prox}} v_{\mathrm{prox}} = A_{\mathrm{sten}} v_{\mathrm{sten}}\) 给出收缩断面处速度放大。将不可恢复损失写成**速度头损失**标准形（参见 Idelchik 流阻手册、Olufsen/Smith 等 1D 动脉网络文献中对局部阻力的处理）：
-
-\[
-\Delta p_{\mathrm{loss}} = K\,\frac{\rho\,v_{\mathrm{throat}}^2}{2},
-\]
-
-其中 \(K\) 为**无量纲形阻系数**，量级由面积比决定。对突然收缩，常用一阶近似（Borda–Carnot 型面积比标度）：
-
-\[
-K \approx \left(\frac{A_{\mathrm{prox}}}{A_{\mathrm{sten}}} - 1\right)^2.
-\]
-
-在 `set_lumen_area_profile(..., lesions=[...])` 中，狭窄段参考面积乘以 `area_scale`（即 \(A_{\mathrm{sten}}/A_{\mathrm{prox}} \approx \texttt{area\_scale}\)），故
-
-\[
-K_{\mathrm{total}} = \texttt{stenosis\_loss\_coefficient} \cdot \left(\frac{1}{\texttt{area\_scale}} - 1\right)^2,
-\]
-
-`stenosis_loss_coefficient` 为全局标定因子（默认 1.0），用于与影像/导管数据拟合时整体放大或缩小形阻。
-
-#### 3.4.2 在一维动量方程中的实现
-
-狭窄区间轴向长度 \(L_{\mathrm{lesion}} = x_1 - x_0\)。将总损失 \(\Delta p_{\mathrm{loss}} = K_{\mathrm{total}}\,\rho\,(Q/A)^2/2\) 沿 \(L_{\mathrm{lesion}}\) **均布**为沿程损失梯度（与有限体积单元中心源项离散一致）：
-
-\[
-\frac{\mathrm{d}p_{\mathrm{loss}}}{\mathrm{d}x}
-= \frac{K_{\mathrm{total}}}{L_{\mathrm{lesion}}}\,
-  \frac{\rho}{2}\left(\frac{Q}{A}\right)^2
-= K(x)\,\frac{\rho}{2}\left(\frac{Q}{A}\right)^2,
-\qquad
-K(x) = \frac{K_{\mathrm{total}}}{L_{\mathrm{lesion}}}\;\text{（单位 cm}^{-1}\text{）}.
-\]
-
-守恒型动量方程中，压力梯度以通量散度 \(\partial(pA/\rho^*)/\partial x\) 出现；等效源项写法为
-
-\[
-S_{\mathrm{sten}} = -\frac{A}{\rho^*}\,\frac{\mathrm{d}p_{\mathrm{loss}}}{\mathrm{d}x}
-= -\frac{K(x)\,\rho\,Q|Q|}{2A\,\rho^*}.
-\]
-
-代码对应 `stenosis_form_loss_source()`，在 `_spatial_operator` 中与 Poiseuille 项叠加。\(Q|Q|\) 保证反向流动时损失仍做负功。非狭窄段 \(K(x)=0\)。
-
-#### 3.4.3 与 tube law 的分工
-
-| 机制 | 数学载体 | 主要效应 |
-|------|----------|----------|
-| 管壁弹性 | \(p = P_{\mathrm{ref}}+\beta(\sqrt{A}-\sqrt{A_0})\) | 脉动传播、局部容积顺应 |
-| Poiseuille 摩擦 | \(-8\pi\mu Q/A\) | 全段微弱沿程耗散 |
-| 狭窄形阻 | \(-K(x)\rho Q|Q|/(2A\rho^*)\) | 狭窄段不可逆动能损失，**远心端压力降低** |
-
-显示压力仍由 tube law 从 \(A\) 代数闭合；形阻通过改变动量方程中的 \(Q,A\) 演化，间接使远段 \(A\) 与 \(p\) 低于无狭窄情形。
-
-#### 3.4.4 相关 API
-
-| 符号 / 字段 | 说明 |
-|-------------|------|
-| `BloodFlowParameters.stenosis_loss_coefficient` | \(K_{\mathrm{total}}\) 的全局乘子 |
-| `NavierStokes1D.stenosis_loss_k` | 网格上的 \(K(x)\)（1/cm），`set_lumen_area_profile` 根据 `lesions` 自动填充 |
-| `stenosis_loss_k_total(area_scale)` | 由 `area_scale` 算 \(K_{\mathrm{total}}\) |
-| `stenosis_form_loss_source(...)` | 形阻源项数组 |
 
 ---
 
@@ -290,8 +212,10 @@ P_{\mathrm{lumen}} = P_{\mathrm{wk}} + R_p\, Q_{\mathrm{drive}}
 其中：
 
 \[
-Q_{\mathrm{drive}} = \tfrac{1}{2}\bigl(Q_{\mathrm{in}} + Q_{\mathrm{lumen,out}}\bigr)
+Q_{\mathrm{drive}} = Q_{\mathrm{lumen,out}}
 \]
+
+（取末端管腔流量，强调管腔–微循环质量守恒；代码中保留 `(Q_in + Q_lumen)/2` 的注释备选。）
 
 出口边界施加：
 
@@ -387,16 +311,14 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    QIN["Q_in(t) 入口"]
     QLO["Q_lumen = U[1,-1] 出口管腔"]
-    QDRV["Q_drive = ½(Q_in + Q_lumen)"]
+    QDRV["Q_drive = Q_lumen"]
     ODE["C · dP_wk/dt = Q_drive − P_wk/R_d"]
     PWK["P_wk"]
     PLUM["P_lumen = P_wk + Rp·Q_drive  (3wk)"]
     QOUT["Q_out = P_wk / R_d"]
     AOUT["A_out = area_from_lumen_pressure(P_lumen)"]
 
-    QIN --> QDRV
     QLO --> QDRV
     QDRV --> ODE
     ODE --> PWK
@@ -454,6 +376,36 @@ sequenceDiagram
 ```
 
 **一句话**：入口像**脉动流量泵**（只推 \(Q\)），出口像**带顺应性的微循环储器**（用 \(P_{\mathrm{wk}}\) 与 \(R_d\) 控制出流和远端压力）；二者经管内双曲 PDE 耦合，tube law 把面积变化转为各点显示压力 \(p_j\)。
+
+### 5.5 初值与模块耦合
+
+`set_lumen_area_profile` 在设置 \(A_0(x)\) 后**同步初始化** PDE 状态与出口 Windkessel，使各模块在 \(t=0\) 自洽：
+
+| 量 | 初值 | 依据 |
+|----|------|------|
+| \(A(x,0)\) | \(A_0(x)\) | tube law → \(p \approx P_{\mathrm{ref}}\) |
+| \(Q(x,0)\) | \(Q_{\mathrm{in}}(0)\) | 与入口定流量 BC 一致（**非** \(Q_{\mathrm{mean}}\)） |
+| \(P_{\mathrm{wk}}(0)\) | \(Q_{\mathrm{mean}}\, R_d = P_{\mathrm{ref}}\) | Windkessel 稳态标定 |
+| \(P_{\mathrm{lumen}}(0)\)（3wk） | \(P_{\mathrm{wk}} + R_p\, Q_{\mathrm{in}}(0)\) | `outlet.reset(q_drive=…)` |
+
+**参数标定链**（默认自动，勿拆开改）：
+
+```text
+CO, coronary_fraction  →  Q_mean
+P_ref (tube law)       →  R_d = P_ref / Q_mean
+outlet_proximal_fraction  →  R_p = fraction · R_d
+```
+
+稳态对齐关系：当 \(A=A_0\)、\(Q=Q_{\mathrm{mean}}\) 时，tube law 给出 \(p=P_{\mathrm{ref}}\)，Windkessel 给出 \(P_{\mathrm{wk}}=P_{\mathrm{ref}}\)。
+
+**`_OutletWindkesselState.reset(p_wk=None, q_drive=None)`**
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `p_wk` | `Q_mean · R_d` | 顺应性节点压 |
+| `q_drive` | `Q_in(0)` | 三元模型计算 \(P_{\mathrm{lumen}}=P_{\mathrm{wk}}+R_p Q_{\mathrm{drive}}\) |
+
+建议 `duration_s` 取 ≥2–3 个心动周期再统计；若需进一步减小启动瞬态，可离线预积分 Windkessel 取周期末 \(P_{\mathrm{wk}}\) 传入 `reset(p_wk=…)`（见 §11）。
 
 ---
 
@@ -518,13 +470,13 @@ solver.set_lumen_area_profile(
 | `area` | 至少 2 个点；定义 \(A_0(x)\) |
 | `x` | 与 `area` 等长；若未覆盖 0 或 L，自动在端点补常值外推 |
 | `beta` | 标量 → 全场常数；数组 → 插值到求解网格 |
-| `lesions` | 在插值后的 \(A_0,\beta\) 上，对 \([x_0,x_1]\) 闭区间乘以 `area_scale`、`beta_scale`；并据 §3.4 填充 `stenosis_loss_k` |
+| `lesions` | 在插值后的 \(A_0,\beta\) 上，对 \([x_0,x_1]\) 闭区间乘以 `area_scale`、`beta_scale` |
 
 调用后会：
 
-- 将 `state[0] = A₀`，`state[1] = 0`（静止初值）
-- 更新 `pressure`
-- 重置出口 Windkessel 初值
+- 将 `state[0] = A₀(x)`，`state[1] = Q_in(0)`（与入口 BC 一致，非静止初值）
+- 由 tube law 更新 `pressure`（\(A=A_0\) 时 \(p \approx P_{\mathrm{ref}}\)）
+- 调用 `outlet.reset(p_wk=Q_mean·R_d, q_drive=Q_in(0))` 重置 Windkessel；三元模型含 \(R_p Q_{\mathrm{in}}(0)\) 项
 
 ### 7.2 由半径构造面积
 
@@ -578,7 +530,6 @@ lesions=[(12.0, 18.0, 0.65, 4.5)]
 |------|------|------|
 | `p_ref_mmhg` | 80 | tube law 参考压 (mmHg) |
 | `beta_mmhg_per_sqrt_cm` | 750 | 默认 \(\beta\) |
-| `stenosis_loss_coefficient` | 1.0 | 狭窄形阻 \(K_{\mathrm{total}}\) 的全局标定因子（§3.4） |
 
 ### 8.3 入口（→ `coronary_inlet_flow`）
 
@@ -626,7 +577,6 @@ NavierStokes1D(
 | `length`, `nx`, `dx` | 长度、节点数、间距 |
 | `x` | 节点坐标 (cm)，shape `(nx,)` |
 | `area_ref`, `beta` | 参考几何，shape `(nx,)` |
-| `stenosis_loss_k` | 狭窄形阻强度 \(K(x)\)（1/cm），shape `(nx,)` |
 | `state` | 守恒变量 `[A, Q]`，shape `(2, nx)` |
 | `pressure` | 当前步压力 (mmHg)，shape `(nx,)` |
 | `time` | 当前物理时间 (s) |
@@ -654,8 +604,6 @@ NavierStokes1D(
 |------|------|
 | `lumen_pressure_mmhg(A, A0, beta, p_ref)` | 由面积算压力 |
 | `area_from_lumen_pressure_mmhg(p, A0, beta, p_ref)` | tube law 反解 \(A\) |
-| `stenosis_loss_k_total(area_scale)` | 由狭窄面积比算 \(K_{\mathrm{total}}\) |
-| `stenosis_form_loss_source(Q, A, K, rho, rho_star)` | 狭窄形阻动量源项 |
 
 ---
 
@@ -727,9 +675,8 @@ p_ref = NavierStokes1D.reference_outlet_pressure(t, par)
 | 更高空间精度 | 增大 `n_nodes`；略减小 `cfl`（如 0.35–0.45） |
 | 加快计算 | 减小 `n_nodes` 或 `duration_s`；增大 `record_interval_steps` |
 | 不稳定 / 振荡 | 减小 `cfl`；检查 \(\beta\) 是否过大；确认单位一致 |
-| 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s） |
-| 更重狭窄 / 更远段压降 | 减小 `area_scale` 或增大 `stenosis_loss_coefficient`；必要时加密狭窄区网格 |
-| 形阻过强 / 数值振荡 | 略减小 `stenosis_loss_coefficient` 或 `cfl` |
+| 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s）；初值已用 \(Q_{\mathrm{in}}(0)\) 与稳态 \(P_{\mathrm{wk}}\)，启动瞬态较旧版 \(Q=0\) 更短 |
+| 更重狭窄 | 适当增大狭窄段 `beta_scale`；必要时加密网格 |
 
 计算量：每步 2 次空间算子（SSP-RK2），复杂度 \(O(n_x)\)。`nx=121`, `T=2` s 时通常为 \(10^4\) 量级步数，普通 PC 上数十秒量级。
 
@@ -739,9 +686,9 @@ p_ref = NavierStokes1D.reference_outlet_pressure(t, par)
 
 1. **单支、单出口** 1D 模型，无分叉与侧支流量分配（`coronary_outlet.coronary_outlet_flow_distribution` 未接入）。
 2. 出口为 **Windkessel–tube law 耦合**，非特征非反射边界；与纯 prescribed \(P(t)\) 或纯 \(Q\) 外推不同。
-3. 摩擦为线性 Poiseuille；狭窄损失为均布 Bernoulli 型形阻（§3.4），未含湍流、弯曲、侧支分流等。
+3. 摩擦为线性 Poiseuille，未含湍流、弯曲损失等。
 4. **FFR** 为简化压比，非临床标准。
-5. 初值为 \(A=A_0, Q=0\)，需数个周期达到周期性解。
+5. 初值为 \(A=A_0,\; Q=Q_{\mathrm{in}}(0)\)，\(P_{\mathrm{wk}}=P_{\mathrm{ref}}\)；脉动工况下仍建议 ≥2 个心动周期再取统计量。
 
 扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像中心线半径 CSV 转为 `set_lumen_area_profile` 输入；多支血管可在外层循环或多段拼接。
 
@@ -769,6 +716,9 @@ A：设置 `MPLBACKEND=Agg`，在 `plot_results()` 后增加 `fig.savefig("resul
 
 **Q：`set_lumen_area_profile` 与 `lesions` 顺序？**  
 A：先插值 `area`/`beta` 到网格，再对 `lesions` 区间做乘法修正。
+
+**Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
+A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 仍用 \(Q_{\mathrm{mean}} R_d\) 稳态标定，与 tube law 的 \(P_{\mathrm{ref}}\) 对齐。
 
 ---
 
