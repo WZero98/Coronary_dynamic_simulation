@@ -481,7 +481,7 @@ def plot_coronary_outlet_pressure(
     ax3.legend()
 
     fig.suptitle(
-        f"HR={heart_rate} bpm  |  Q_mean≈{stats2['Q_mean_mL_s']:.2f} mL/s  |  "
+        f"HR={heart_rate} bpm  |  Q_mean≈{stats2['Q_mean_mL_s']:.2f} mL/s  |  R_d = {r_distal_mmhg_s_per_ml} mmHg·s/mL"
         f"二元均值 {stats2['P_mean_mmHg']:.1f} mmHg  |  三元均值 {stats3['P_mean_mmHg']:.1f} mmHg",
         fontsize=11,
     )
@@ -499,14 +499,17 @@ def plot_coronary_outlet_pressure(
 if __name__ == "__main__":
     hr, co, frac = 75.0, 5.0, 0.03
     duration_s = 30
+    r_d = None
     # rp, rd 可根据提供的流量进行估算，也可以直接给出
     t = np.linspace(0.0, duration_s, int(800 * duration_s))
 
     p2 = coronary_outlet_pressure(
-        t, model="2wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac
+        t, model="2wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac,
+        r_distal_mmhg_s_per_ml=r_d,
     )
     p3, p_wk = coronary_outlet_pressure(
-        t, model="3wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac
+        t, model="3wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac,
+        r_distal_mmhg_s_per_ml=r_d,
     )
     print(f"时间点数: {len(t)}, P2 range [{p2.min():.1f}, {p2.max():.1f}] mmHg")
     print(
@@ -515,5 +518,6 @@ if __name__ == "__main__":
     )
 
     plot_coronary_outlet_pressure(
-        heart_rate=hr, cardiac_output=co, coronary_fraction=frac, duration_s=duration_s
+        heart_rate=hr, cardiac_output=co, coronary_fraction=frac, duration_s=duration_s,
+        r_distal_mmhg_s_per_ml=r_d,
     )

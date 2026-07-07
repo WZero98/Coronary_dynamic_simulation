@@ -38,7 +38,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 2. 沿 [0, L] 的管腔参考截面积 A₀(x)（及可选 β(x)）
 3. BloodFlowParameters 中的血液物性、数值参数、入口/出口 Windkessel 参数
 """
-
+import time
 from dataclasses import dataclass
 from typing import Literal, Sequence
 
@@ -194,10 +194,10 @@ class BloodFlowParameters:
     """固定物性、数值、入口与出口参数。"""
 
     # 流体相关
-    rho: float = 1.05  # 血液密度 (g/cm³)
+    rho: float = 1.06  # 血液密度 (g/cm³)
     alpha: float = 1.1  # 动量修正系数（层流常取 1.1）
     mu: float = 0.0035  # 血液粘度 (cm²/s)
-    cfl: float = 1.0  # 数值稳定性参数 CFL
+    cfl: float = 0.5  # 数值稳定性参数 CFL
     dt_max_s: float = 5e-4  # 时间步上限 (s)
 
     # 管壁相关 tube law
@@ -206,14 +206,14 @@ class BloodFlowParameters:
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
-    cardiac_output_l_per_min: float = 5.0  # 心脏输出量 (L/min)
+    cardiac_output_l_per_min: float = 5.5  # 心脏输出量 (L/min)
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
     inlet_min_flow_fraction: float = 0.1  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
     inlet_fourier_coefficients: Sequence[tuple[int, float, float]] | None = None  # 自定义谐波（傅里叶变换的系数）；None 用模块内置默认系数
 
     # 出口 Windkesse模型 相关
-    outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
+    outlet_windkessel: Literal["2wk", "3wk"] = "2wk"
     outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.08  # 血管顺应性，越大顺应性越好 
@@ -297,8 +297,8 @@ class _OutletWindkesselState:
 
     def apply_substep(self, q_lumen: float, q_inlet: float = 0.0) -> tuple[float, float]:
         """SSP-RK 子步：固定 Windkessel 状态，返回 (Q_out, P_lumen)。"""
-        q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
-        # q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
+        # q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
+        q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
         q_out = self.outlet_flow_from_state()
         return q_out, self.lumen_pressure(q_drive)
 
@@ -306,8 +306,8 @@ class _OutletWindkesselState:
         """完整时间步末：推进 C·dP_wk/dt = Q_drive − P_wk/R_d。"""
         if dt <= 0.0:
             return self.apply_substep(q_lumen, q_inlet)
-        q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
-        # q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
+        # q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
+        q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
         self.p_wk += (dt / self.c) * (
             q_drive - self.p_wk / max(self.r_d, 1e-9)
         )
@@ -351,7 +351,7 @@ class NavierStokes1D:
         self.area_ref = np.full(self.nx, 0.5)  # TODO 需修改为管腔分割后计算出的管腔截面积
         self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)  # TODO 识别到斑块处，弹性降低，β越大
         self.state = np.zeros((2, self.nx))  # U = [A(x, t), Q(x, t)] 状态变量
-        self.pressure = np.zeros(self.nx)  # P(x, t) 管腔压力
+        self.pressure = np.zeros(self.nx)  # P(x, t) 管腔壁所受侧压力
 
         self.outlet = _OutletWindkesselState(self.paras)  # 出口状态
         self.time = 0.0
@@ -418,10 +418,15 @@ class NavierStokes1D:
                 self.area_ref[mask] *= a_scale
                 self.beta[mask] *= b_scale
 
+        # 设置初值
+        q_mean = self.paras.mean_coronary_flow_ml_s()
+        r_d, _ = self.paras.resolve_outlet_resistances()
+
         self.state[0] = self.area_ref.copy()
-        self.state[1] = 0.0
+        self.state[1] = q_mean
         self._update_pressure()  # 管腔各处压力初始值
-        self.outlet.reset(p_wk=float(self.pressure[-1]))  # 出口压力初始值
+        # # Windkessel 初值用稳态标定，而非 tube law 的 P_ref
+        self.outlet.reset(p_wk=float(q_mean * r_d))  # 出口压力初始值
 
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
         u = self.state if state is None else state
@@ -504,9 +509,10 @@ class NavierStokes1D:
         return u
 
     @staticmethod
-    def _clip_area(state: np.ndarray, area_ref: np.ndarray) -> np.ndarray:
+    def _clip_state(state: np.ndarray, area_ref: np.ndarray) -> np.ndarray:
         u = state.copy()
-        u[0] = np.maximum(u[0], 0.1 * area_ref)
+        u[0] = np.maximum(u[0], 0.8 * area_ref)
+        # u[1] = np.maximum(u[1], 0.0)
         return u
 
     def _stable_timestep(self, state: np.ndarray) -> float:
@@ -522,10 +528,10 @@ class NavierStokes1D:
         self._outlet_dt = dt
         u0 = self._apply_boundaries(self.state)
         k0 = self._spatial_operator(u0)
-        u1 = self._clip_area(u0 + dt * k0, self.area_ref)
+        u1 = self._clip_state(u0 + dt * k0, self.area_ref)
         u1 = self._apply_boundaries(u1)
         k1 = self._spatial_operator(u1)
-        self.state = self._clip_area(
+        self.state = self._clip_state(
             0.5 * u0 + 0.5 * (u1 + dt * k1), self.area_ref
         )
         self.state = self._apply_boundaries(self.state, advance_outlet=True)
@@ -554,7 +560,13 @@ class NavierStokes1D:
             f"T={duration_s:.3f} s, outlet={self.paras.outlet_windkessel}"
         )
 
+        t0 = time.perf_counter()
         while self.time < duration_s - 1e-15:
+            print(
+                f"current time: {self.time:.6f} s / Total: {duration_s:.2f} s",
+                flush=True,
+                end="\r",
+            )
             dt = self._stable_timestep(self.state)
             if self.time + dt > duration_s:
                 dt = duration_s - self.time
@@ -571,7 +583,8 @@ class NavierStokes1D:
         self.history_area = np.array(a_hist)
         self.history_flow = np.array(q_hist)
         self.history_pressure = np.array(p_hist)
-        print(f"完成 {step} 步, t={self.time:.4f} s")
+        t1 = time.perf_counter()
+        print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
         return (
             self.history_area,
             self.history_flow,
@@ -642,51 +655,216 @@ class NavierStokes1D:
         fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
 
         ax = axes[0, 1]
-        ax.plot(xx, np.mean(self.history_pressure, axis=0), "g-", lw=1.8)
-        ax.set(xlabel="x (cm)", ylabel="p (mmHg)", title="⟨p(x)⟩_t")
+        q_mean = np.mean(self.history_flow[3000:, :], axis=0)
+        ax.plot(xx, q_mean, "g-", lw=1.8, label="Q")
+        ax.set(xlabel="x (cm)", ylabel="Q (cm³/s)", title="沿程流量（时间平均）")
+        ax.legend(loc="best", fontsize=9)
         ax.grid(True, alpha=0.3)
 
         ax = axes[1, 0]
-        ax.plot(tt, self.history_flow[:, 0], "r-", lw=1.5, label="Q")
-        ax2 = ax.twinx()
-        ax2.plot(tt, self.history_pressure[:, 0], "g--", lw=1.5, label="p")
-        ax.set(xlabel="t (s)", title="入口")
+        ax.plot(tt, self.history_pressure[:, 348], "r-", lw=1.5, label="x=348")
+        ax.plot(tt, self.history_pressure[:, 0], "b-", lw=1.5, label="x=0")
+        ax.set(xlabel="t (s)", ylabel="p(mmHg)", title="x = 0(blue) / 300(red)")
         ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=9)
 
         ax = axes[1, 1]
-        ax.plot(xx, self.history_area[-1], "b-", label="A")
+        ax.plot(xx, self.history_area[-1], "b-", lw=1.5, label="A")
+        ax.set(xlabel="x (cm)", ylabel="A (cm²)", title=f"t = {tt[-1]:.3f} s")
         axr = ax.twinx()
-        axr.plot(xx, self.history_pressure[-1], "g--", label="p")
-        ax.set(xlabel="x (cm)", title=f"t = {tt[-1]:.3f} s")
+        axr.plot(xx, self.history_pressure[-1], "g--", lw=1.5, label="p")
+        axr.set_ylabel("p (mmHg)")
+        lines_l, labels_l = ax.get_legend_handles_labels()
+        lines_r, labels_r = axr.get_legend_handles_labels()
+        ax.legend(lines_l + lines_r, labels_l + labels_r, loc="best", fontsize=9)
         ax.grid(True, alpha=0.3)
 
         fig.tight_layout()
         plt.show()
 
+    def plot_results_1(self, show: bool = True, renderer: str | None = None):
+        """
+        与 plot_results 相同的四幅图，使用 Plotly 在浏览器中交互显示。
+
+        Parameters
+        ----------
+        show : bool
+            是否调用 fig.show() 打开浏览器
+        renderer : str, optional
+            传给 plotly fig.show(renderer=...)，如 "browser"
+        """
+        if self.history_time is None:
+            raise RuntimeError("请先调用 run()")
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        tt = self.history_time
+        xx = self.x
+        t_end = float(tt[-1])
+
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=(
+                "A(t, x) [cm²]",
+                "沿程流量（时间平均）",
+                "x = 0(blue) / 300(red)",
+                f"t = {t_end:.3f} s",
+            ),
+            specs=[[{}, {}], [{}, {"secondary_y": True}]],
+            vertical_spacing=0.12,
+            horizontal_spacing=0.1,
+        )
+
+        fig.add_trace(
+            go.Heatmap(
+                x=tt,
+                y=xx,
+                z=self.history_area.T,
+                colorscale="Viridis",
+                colorbar=dict(title="A [cm²]", len=0.45, y=0.78),
+                hovertemplate="t=%{x:.4f} s<br>x=%{y:.3f} cm<br>A=%{z:.4f} cm²<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+
+        q_hist = self.history_flow
+        q_slice = q_hist[3000:, :] if q_hist.shape[0] > 3000 else q_hist
+        q_mean = np.mean(q_slice, axis=0)
+        fig.add_trace(
+            go.Scatter(
+                x=xx,
+                y=q_mean,
+                mode="lines",
+                name="Q",
+                line=dict(color="green", width=2),
+                hovertemplate="x=%{x:.3f} cm<br>Q=%{y:.4f} cm³/s<extra></extra>",
+            ),
+            row=1,
+            col=2,
+        )
+
+        idx_far = min(348, self.nx - 1)
+        idx_near = 0
+        fig.add_trace(
+            go.Scatter(
+                x=tt,
+                y=self.history_pressure[:, idx_near],
+                mode="lines",
+                name="x=0",
+                line=dict(color="blue", width=1.5),
+                hovertemplate="t=%{x:.4f} s<br>p=%{y:.3f} mmHg<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=tt,
+                y=self.history_pressure[:, idx_far],
+                mode="lines",
+                name=f"x={idx_far}",
+                line=dict(color="red", width=1.5),
+                hovertemplate="t=%{x:.4f} s<br>p=%{y:.3f} mmHg<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=xx,
+                y=self.history_area[-1],
+                mode="lines",
+                name="A",
+                line=dict(color="blue", width=1.5),
+                hovertemplate="x=%{x:.3f} cm<br>A=%{y:.4f} cm²<extra></extra>",
+            ),
+            row=2,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xx,
+                y=self.history_pressure[-1],
+                mode="lines",
+                name="p",
+                line=dict(color="green", width=1.5, dash="dash"),
+                hovertemplate="x=%{x:.3f} cm<br>p=%{y:.3f} mmHg<extra></extra>",
+            ),
+            row=2,
+            col=2,
+            secondary_y=True,
+        )
+
+        fig.update_xaxes(title_text="t (s)", row=1, col=1)
+        fig.update_yaxes(title_text="x (cm)", row=1, col=1)
+        fig.update_xaxes(title_text="x (cm)", row=1, col=2)
+        fig.update_yaxes(title_text="Q (cm³/s)", row=1, col=2)
+        fig.update_xaxes(title_text="t (s)", row=2, col=1)
+        fig.update_yaxes(title_text="p (mmHg)", row=2, col=1)
+        fig.update_xaxes(title_text="x (cm)", row=2, col=2)
+        fig.update_yaxes(title_text="A (cm²)", row=2, col=2)
+        fig.update_yaxes(title_text="p (mmHg)", row=2, col=2, secondary_y=True)
+
+        fig.update_layout(
+            height=720,
+            width=1100,
+            title_text="Navier-Stokes 1D 结果",
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            template="plotly_white",
+        )
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="rgba(0,0,0,0.08)")
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="rgba(0,0,0,0.08)")
+
+        if show:
+            show_kw = {"renderer": renderer} if renderer is not None else {}
+            fig.show(**show_kw)
+        return fig
+
 
 def _demo():
-    pullback_speed = 75  # mm/s
+    from scipy.ndimage import gaussian_filter1d
+    np.random.seed(569)
+    sigma_nodes = 8   # 按网格点，2–5 试起
+    pullback_speed = 58  # mm/s
     frames_per_s = 200 # fps
     pullback_time = 2  # s
-    nx = int(pullback_time * frames_per_s)
+    # nx = int(pullback_time * frames_per_s)
     length = pullback_speed * pullback_time / 10  # cm
+    
     duration_s = 3  # s
+    area_file = np.load('area_1.npy')
+    area = area_file[::-1] / 100
+    area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
+    nx = area.shape[0]
     x = np.linspace(0, length, nx)
-    area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
+    # area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
     print(nx, length)
 
-    lesions = [(3, 4, 1, 10), (7, 8, 1, 10)]
+    # lesions = [(2.8, 3.4, 1, 2), (5, 6, 1, 2)]
+    lesions = None
 
     par = BloodFlowParameters()
     solver = NavierStokes1D(length, nx, par)
     solver.set_lumen_area_profile(
-        area,
+        area_smooth,
         x=x,
-        lesions=lesions,
+        lesions=lesions
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
-    solver.plot_results()
+    solver.plot_results_1()
+    q_in  = np.mean(solver.history_flow[:, 0])
+    q_out = np.mean(solver.history_flow[:, -1])
+    print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, diff={q_in-q_out:.3f}")
+    # 若 diff 长期显著 > 0，压力下降很可能是质量失衡
 
+    q_mean = np.nanmean(solver.history_flow, axis=0)
+    ffr = q_mean / par.mean_coronary_flow_ml_s()
+    return ffr
 
 if __name__ == "__main__":
-    _demo()
+    ffr = _demo()
+    print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")
