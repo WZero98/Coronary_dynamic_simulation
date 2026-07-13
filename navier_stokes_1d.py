@@ -19,6 +19,9 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 --------------------------
     p(A, x) = P_ref + β(x)·(√A − √A₀(x))
 
+    p 为管腔标量压（各向同性，非轴向/径向矢量分量）。tube law 将其与截面面积 A 耦合
+    （径向胀缩）；动量通量中 ∂(pA)/∂x 则体现沿 x 的压力梯度对轴向流量 Q 的驱动。
+
     A₀(x) 由用户给定的沿程管腔参考面积描述；β(x) 为管壁刚度（可常数或随 x 给定）。
 
 边界条件
@@ -26,7 +29,8 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 - 入口：coronary_inlet.coronary_inlet_flow 提供生理脉动入口流量 Q_in(t)（mL/s ≡ cm³/s）
 - 出口：coronary_outlet 中 Windkessel 模型提供出口管腔压；求解过程中按
         C·dP_wk/dt = Q_drive − P_wk/R_d 推进微循环状态（与 windkessel2/3 一致），
-        Q_drive 取末端管腔流量 Q(L)；再由 tube law 确定出口 A，流量与管腔/微循环闭合
+        Q_drive 取出口管腔流量 Q(L)（0D–1D 质量闭合）；P_wk/R_d 为微循环侧出流，
+        不再强制赋值给 Q(L)。再由 tube law 确定出口 A(L)
 
 初值与模块耦合（set_lumen_area_profile）
 ----------------------------------------
@@ -56,10 +60,6 @@ import numpy as np
 
 from coronary_constants import P_INLET_REF_MMHG, rho_for_mmhg_pressure_coupling
 from coronary_inlet import coronary_inlet_flow
-from coronary_outlet import (
-    windkessel2_outlet_pressure,
-    windkessel3_outlet_pressure,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +71,15 @@ def lumen_pressure_mmhg(
     beta: np.ndarray,
     p_ref: float = P_INLET_REF_MMHG,
 ) -> np.ndarray:
-    """p = P_ref + β(√A − √A₀)。"""
-    a = np.maximum(np.asarray(area, dtype=float), 1e-12)
+    """由 tube law 计算管腔标量压 p（mmHg）：p = P_ref + β(√A − √A₀)。
+
+    p 为各向同性热力学压强，非某一坐标方向的应力分量；此处由 A 闭合，
+    用于 tube law 径向胀缩关系及动量方程中的 ∂(pA)/∂x 项。
+    """
     a0 = np.asarray(area_ref, dtype=float)
+    a = np.maximum(np.asarray(area, dtype=float), 0.5 * a0)
     b = np.asarray(beta, dtype=float)
-    return p_ref + b * (np.sqrt(a) - np.sqrt(a0))
+    return (p_ref + b * (np.sqrt(a) - np.sqrt(a0)))
 
 
 def area_from_lumen_pressure_mmhg(
@@ -89,9 +93,8 @@ def area_from_lumen_pressure_mmhg(
     b = np.asarray(beta, dtype=float)
     p = np.asarray(pressure, dtype=float)
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
-    return np.maximum(sqrt_a**2, 0.1 * a0)
-
-
+    return np.maximum(sqrt_a**2, 0.5 * a0)
+    
 # ---------------------------------------------------------------------------
 # TVD / MUSCL / HLL
 # ---------------------------------------------------------------------------
@@ -108,7 +111,7 @@ def _muscl_states(
     U: np.ndarray, 
     area_ref: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """单元界面 j+½ 的左右重构状态（内部界面）。"""
+    """单元界面 j+1/2 的左右重构状态（内部界面）。"""
     nvar, nx = U.shape  # nvar 为未知函数量，nx 为划分单元数
     slope = np.zeros_like(U)
     if nx >= 3:
@@ -117,7 +120,7 @@ def _muscl_states(
     u_left = U[:, :-1] + 0.5 * slope[:, :-1]
     # 右状态计算，来自下一个单元
     u_right = U[:, 1:] - 0.5 * slope[:, 1:]
-    floor = 0.1 * area_ref
+    floor = 0.5 * area_ref
     u_left[0] = np.maximum(u_left[0], floor[:-1])
     u_right[0] = np.maximum(u_right[0], floor[1:])
     return u_left, u_right
@@ -207,23 +210,23 @@ class BloodFlowParameters:
     rho: float = 1.06  # 血液密度 (g/cm³)
     alpha: float = 1.1  # 动量修正系数（层流常取 1.1）
     mu: float = 0.0035  # 血液粘度 (cm²/s)
-    cfl: float = 0.5  # 数值稳定性参数 CFL
-    dt_max_s: float = 5e-4  # 时间步上限 (s)
+    cfl: float = 0.8  # 数值稳定性参数 CFL
+    dt_max_s: float = 2e-4  # 时间步上限 (s)
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 750.0  # 默认β，越大表示管腔越硬（管壁刚度）
+    beta_mmhg_per_sqrt_cm: float = 1500  # 默认β，越大表示管腔越硬（管壁刚度）
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
     cardiac_output_l_per_min: float = 5.5  # 心脏输出量 (L/min)
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
-    inlet_min_flow_fraction: float = 0.1  # 流量下限，即最小值占整个流量平均值的比例
+    inlet_min_flow_fraction: float = 0.25  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
     inlet_fourier_coefficients: Sequence[tuple[int, float, float]] | None = None  # 自定义谐波（傅里叶变换的系数）；None 用模块内置默认系数
 
     # 出口 Windkesse模型 相关
-    outlet_windkessel: Literal["2wk", "3wk"] = "2wk"
+    outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
     outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.08  # 血管顺应性，越大顺应性越好 
@@ -316,27 +319,26 @@ class _OutletWindkesselState:
         return self.p_wk
 
     def outlet_flow_from_state(self) -> float:
+        """微循环侧出流 Q_venous = P_wk/R_d（不等于管腔 Q(L)）。"""
         return self.p_wk / max(self.r_d, 1e-9)
 
-    def apply_substep(self, q_lumen: float, q_inlet: float = 0.0) -> tuple[float, float]:
-        """SSP-RK 子步：固定 Windkessel 状态，返回 (Q_out, P_lumen)。"""
-        # q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
-        q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
-        q_out = self.outlet_flow_from_state()
-        return q_out, self.lumen_pressure(q_drive)
+    def apply_substep(self, q_lumen: float) -> tuple[float, float]:
+        """SSP-RK 子步：固定 Windkessel 状态，返回 (Q_venous, P_lumen)。"""
+        q_drive = float(q_lumen)
+        q_venous = self.outlet_flow_from_state()
+        return q_venous, self.lumen_pressure(q_drive)
 
-    def advance(self, dt: float, q_lumen: float, q_inlet: float = 0.0) -> tuple[float, float]:
-        """完整时间步末：推进 C·dP_wk/dt = Q_drive − P_wk/R_d。"""
+    def advance(self, dt: float, q_lumen: float) -> tuple[float, float]:
+        """完整时间步末：推进 C·dP_wk/dt = Q_drive − P_wk/R_d，Q_drive = Q(L)。"""
         if dt <= 0.0:
-            return self.apply_substep(q_lumen, q_inlet)
-        # q_drive = 0.5 * (float(q_lumen) + float(q_inlet))
-        q_drive = float(q_lumen)  # 更强调管腔与微循环质量守恒，只用 q_lumen
+            return self.apply_substep(q_lumen)
+        q_drive = float(q_lumen)
         self.p_wk += (dt / self.c) * (
             q_drive - self.p_wk / max(self.r_d, 1e-9)
         )
-        q_out = self.outlet_flow_from_state()
+        q_venous = self.outlet_flow_from_state()
         self.p_lumen = self.lumen_pressure(q_drive)
-        return q_out, self.p_lumen
+        return q_venous, self.p_lumen
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +350,8 @@ class NavierStokes1D:
 
     Parameters
     ----------
+    area : ndarray
+        参考管腔截面积 (cm²)
     vessel_length_cm : float
         血管长度 L (cm)
     n_nodes : int
@@ -358,6 +362,7 @@ class NavierStokes1D:
 
     def __init__(
         self,
+        area: np.ndarray | list,
         vessel_length_cm: float,
         n_nodes: int,
         parameters: BloodFlowParameters | None = None,
@@ -371,10 +376,10 @@ class NavierStokes1D:
         self.x = np.linspace(0.0, self.length, self.nx)
         self.dx = self.length / (self.nx - 1)
 
-        self.area_ref = np.full(self.nx, 0.5)  # TODO 需修改为管腔分割后计算出的管腔截面积
-        self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)  # TODO 识别到斑块处，弹性降低，β越大
+        self.area_ref = np.asarray(area)  # A₀(x) 参考管腔面积 (cm²)
+        self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm) 
         self.state = np.zeros((2, self.nx))  # U = [A(x, t), Q(x, t)] 状态变量
-        self.pressure = np.zeros(self.nx)  # P(x, t) 管腔壁所受侧压力
+        self.pressure = np.zeros(self.nx)  # p(x,t) 管腔标量压 (mmHg)，沿 x 各点取值；非方向性矢量
 
         self.outlet = _OutletWindkesselState(self.paras)  # 出口状态
         self.time = 0.0
@@ -385,80 +390,22 @@ class NavierStokes1D:
         self.history_flow: np.ndarray | None = None
         self.history_pressure: np.ndarray | None = None
 
-    def set_lumen_area_profile(
-        self,
-        area: np.ndarray,
-        x: np.ndarray | None = None,
-        beta: np.ndarray | float | None = None,
-        lesions: Sequence[tuple[float, float, float, float]] | None = None,
-    ) -> None:
-        """
-        设置 [0, L] 上的参考管腔面积 A₀(x)。
-
-        Parameters
-        ----------
-        area : ndarray
-            参考截面积 (cm²)
-        x : ndarray, optional
-            与 area 对应的轴向位置 (cm)；缺省则在 [0, L] 上均匀采样
-        beta : ndarray or float, optional
-            弹性系数 β(x) (mmHg/√cm)
-        lesions : optional
-            狭窄列表 [(x_start, x_end, area_scale, beta_scale), ...]
-
-        Notes
-        -----
-        调用后同步设置 PDE 初值与出口 Windkessel 状态：
-        - ``state[0] = A₀(x)``，``state[1] = Q_in(0)``
-        - ``P_wk(0) = Q_mean·R_d``（稳态标定，等于 ``P_ref``）
-        - 三元模型经 ``outlet.reset(q_drive=Q_in(0))`` 设 ``P_lumen(0) = P_wk + R_p·Q_in(0)``
-        """
-        area = np.asarray(area, dtype=float)
-        if area.size < 2:
-            raise ValueError("area 至少 2 个点")
-        if x is None:
-            x = np.linspace(0.0, self.length, area.size)
-        else:
-            x = np.asarray(x, dtype=float)
-            if x.size != area.size:
-                raise ValueError("x 与 area 长度须一致")
-
-        if x[0] > 1e-9:
-            x = np.concatenate(([0.0], x))
-            area = np.concatenate(([area[0]], area))
-        if x[-1] < self.length - 1e-9:
-            x = np.concatenate((x, [self.length]))
-            area = np.concatenate((area, [area[-1]]))
-
-        self.area_ref = np.interp(self.x, x, area)
         self.area_ref = np.maximum(self.area_ref, 1e-8)
 
-        if beta is None:
-            self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)
-        elif np.ndim(beta) == 0:
-            self.beta = np.full(self.nx, float(beta))
-        else:
-            beta = np.asarray(beta, dtype=float)
-            bx = x if beta.size == area.size else self.x
-            self.beta = np.interp(self.x, bx, beta)
-
-        if lesions:
-            for x0, x1, a_scale, b_scale in lesions:
-                mask = (self.x >= x0) & (self.x <= x1)
-                self.area_ref[mask] *= a_scale
-                self.beta[mask] *= b_scale
-
-        # 初值：A=A₀ → p≈P_ref；Q=Q_in(0) 与入口 BC 一致；P_wk 稳态标定
+        # 初值：A=A₀；Q=Q_in(0)；P_wk=Q_mean·R_d（R_d 用 outlet 构造时的标定值，勿在抬高 p_ref 后再 resolve）
         q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
         q_mean = self.paras.mean_coronary_flow_ml_s()
-        r_d, _ = self.paras.resolve_outlet_resistances()
+        self.outlet.reset(p_wk=q_mean * self.outlet.r_d, q_drive=q0)
+        if self.outlet.is_three_element:
+            # tube law 锚点 = mean 流量下出口管腔压 P_wk + R_p·Q_mean，与 Windkessel 稳态自洽
+            self.paras.p_ref_mmhg = self.outlet.p_wk + self.outlet.r_p * q_mean
 
         self.state[0] = self.area_ref.copy()
         self.state[1] = q0
         self._update_pressure()
-        self.outlet.reset(p_wk=q_mean * r_d, q_drive=q0)
 
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
+        """由当前 A 经 tube law 更新沿程管腔标量压 p(x)；p 不单独求解守恒方程。"""
         u = self.state if state is None else state
         self.pressure = lumen_pressure_mmhg(
             u[0], self.area_ref, self.beta, self.paras.p_ref_mmhg
@@ -516,20 +463,19 @@ class NavierStokes1D:
     def _apply_boundaries(
         self, state: np.ndarray, advance_outlet: bool = False
     ) -> np.ndarray:
-        u = state.copy()
+        u = state.copy()  #[A, Q]
         q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
 
         u[0, 0] = u[0, 1]
         u[1, 0] = q_in
 
+        q_lumen = float(u[1, -1])  # x=L 处管腔流量
         if advance_outlet and self._outlet_dt > 0.0:
-            q_out, p_out = self.outlet.advance(
-                self._outlet_dt, u[1, -1], q_in
-            )
+            _, p_out = self.outlet.advance(self._outlet_dt, q_lumen)
         else:
-            q_out, p_out = self.outlet.apply_substep(u[1, -1], q_in)
+            _, p_out = self.outlet.apply_substep(q_lumen)
 
-        u[1, -1] = q_out
+        # 出口：Windkessel + tube law 闭合 A(L)；Q(L) 保留管腔 PDE 值，不强制为 P_wk/R_d
         u[0, -1] = area_from_lumen_pressure_mmhg(
             p_out,
             self.area_ref[-1],
@@ -541,7 +487,7 @@ class NavierStokes1D:
     @staticmethod
     def _clip_state(state: np.ndarray, area_ref: np.ndarray) -> np.ndarray:
         u = state.copy()
-        u[0] = np.maximum(u[0], 0.8 * area_ref)
+        u[0] = np.maximum(u[0], 0.5 * area_ref)
         # u[1] = np.maximum(u[1], 0.0)
         return u
 
@@ -609,6 +555,7 @@ class NavierStokes1D:
                 q_hist.append(self.state[1].copy())
                 p_hist.append(self.pressure.copy())
 
+
         self.history_time = np.array(t_hist)
         self.history_area = np.array(a_hist)
         self.history_flow = np.array(q_hist)
@@ -629,40 +576,13 @@ class NavierStokes1D:
         else:
             p_mean = np.mean(self.history_pressure, axis=0)
         return p_mean / p_mean[0]
-
-    @staticmethod
-    def reference_outlet_pressure(
-        times: np.ndarray,
-        parameters: BloodFlowParameters,
-        q_override: np.ndarray | None = None,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
-        """
-        调用 coronary_outlet 离线计算参考出口压力曲线 P_out(t)（mmHg），
-        用于与耦合求解结果对比，不参与时间推进。
-        """
-        t = np.asarray(times, dtype=float)
-        if q_override is None:
-            q = parameters.inlet_flow(t)
-        else:
-            q = np.asarray(q_override, dtype=float)
-        wk_kw = dict(
-            r_distal_mmhg_s_per_ml=parameters.outlet_r_distal_mmhg_s_per_ml,
-            compliance_ml_per_mmhg=parameters.outlet_compliance_ml_per_mmhg,
-        )
-        if parameters.outlet_windkessel == "2wk":
-            return windkessel2_outlet_pressure(t, q, **wk_kw)
-        p_out, p_wk = windkessel3_outlet_pressure(
-            t,
-            q,
-            r_proximal_mmhg_s_per_ml=parameters.outlet_r_proximal_mmhg_s_per_ml,
-            proximal_fraction=parameters.outlet_proximal_fraction,
-            **wk_kw,
-        )
-        return p_out, p_wk
-
+    
     def plot_results(self):
-        if self.history_time is None:
-            raise RuntimeError("请先调用 run()")
+        assert self.history_time is not None, "请先调用 run()"
+        assert self.history_area is not None, "请先调用 run()"
+        assert self.history_flow is not None, "请先调用 run()"
+        assert self.history_pressure is not None, "请先调用 run()"
+
         import matplotlib.pyplot as plt
 
         plt.rcParams.update(
@@ -727,6 +647,10 @@ class NavierStokes1D:
             raise RuntimeError("请先调用 run()")
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
+        assert self.history_time is not None, "请先调用 run()"
+        assert self.history_area is not None, "请先调用 run()"
+        assert self.history_flow is not None, "请先调用 run()"
+        assert self.history_pressure is not None, "请先调用 run()" 
 
         tt = self.history_time
         xx = self.x
@@ -738,7 +662,7 @@ class NavierStokes1D:
             subplot_titles=(
                 "A(t, x) [cm²]",
                 "沿程流量（时间平均）",
-                "x = 0(blue) / 300(red)",
+                "x = 近端(blue) / 远端(red)",
                 f"t = {t_end:.3f} s",
             ),
             specs=[[{}, {}], [{}, {"secondary_y": True}]],
@@ -780,11 +704,11 @@ class NavierStokes1D:
         fig.add_trace(
             go.Scatter(
                 x=tt,
-                y=self.history_pressure[:, idx_near],
+                y=self.history_flow[:, idx_near],
                 mode="lines",
                 name="x=0",
                 line=dict(color="blue", width=1.5),
-                hovertemplate="t=%{x:.4f} s<br>p=%{y:.3f} mmHg<extra></extra>",
+                hovertemplate="t=%{x:.4f} s<br>Q=%{y:.3f} cm³/s<extra></extra>",
             ),
             row=2,
             col=1,
@@ -792,11 +716,11 @@ class NavierStokes1D:
         fig.add_trace(
             go.Scatter(
                 x=tt,
-                y=self.history_pressure[:, idx_far],
+                y=self.history_flow[:, idx_far],
                 mode="lines",
                 name=f"x={idx_far}",
                 line=dict(color="red", width=1.5),
-                hovertemplate="t=%{x:.4f} s<br>p=%{y:.3f} mmHg<extra></extra>",
+                hovertemplate="t=%{x:.4f} s<br>Q=%{y:.3f} cm³/s<extra></extra>",
             ),
             row=2,
             col=1,
@@ -833,14 +757,14 @@ class NavierStokes1D:
         fig.update_xaxes(title_text="x (cm)", row=1, col=2)
         fig.update_yaxes(title_text="Q (cm³/s)", row=1, col=2)
         fig.update_xaxes(title_text="t (s)", row=2, col=1)
-        fig.update_yaxes(title_text="p (mmHg)", row=2, col=1)
+        fig.update_yaxes(title_text="Q (cm³/s)", row=2, col=1)
         fig.update_xaxes(title_text="x (cm)", row=2, col=2)
         fig.update_yaxes(title_text="A (cm²)", row=2, col=2)
         fig.update_yaxes(title_text="p (mmHg)", row=2, col=2, secondary_y=True)
 
         fig.update_layout(
-            height=720,
-            width=1100,
+            height=1000,
+            width=1000,
             title_text="Navier-Stokes 1D 结果",
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -859,40 +783,39 @@ def _demo():
     from scipy.ndimage import gaussian_filter1d
     np.random.seed(569)
     sigma_nodes = 8   # 按网格点，2–5 试起
-    pullback_speed = 58  # mm/s
+    pullback_speed = 35  # mm/s
     frames_per_s = 200 # fps
-    pullback_time = 2  # s
+    pullback_time = 2.5  # s
+    nx = 400
     # nx = int(pullback_time * frames_per_s)
     length = pullback_speed * pullback_time / 10  # cm
     
-    duration_s = 3  # s
-    area_file = np.load('area_2.npy')
-    area = area_file[::-1] / 100
+    duration_s = 5  # s
+    area_file = np.load('area.npy')
+    area = area_file[::-1] / 100 / 20   # 冠脉管腔横截面积约为 1.8 -9 mm² (小于3可能就算狭窄了)
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area.shape[0]
-    x = np.linspace(0, length, nx)
-    # area = np.full((nx, ), 0.53) + np.random.random((nx, )) * 0.01
+    area = np.full((nx, ), 0.07) # + np.random.random((nx, )) * 0.01
     print(nx, length)
 
-    # lesions = [(2.8, 3.4, 1, 2), (5, 6, 1, 2)]
-    lesions = None
-
-    par = BloodFlowParameters()
-    solver = NavierStokes1D(length, nx, par)
-    solver.set_lumen_area_profile(
-        area_smooth,
-        x=x,
-        lesions=lesions
-    )
+    parameters = BloodFlowParameters()
+    solver = NavierStokes1D(area_smooth, length, nx, parameters)
     solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results_1()
+
+    assert solver.history_time is not None, "请先调用 run()"
+    assert solver.history_area is not None, "请先调用 run()"
+    assert solver.history_flow is not None, "请先调用 run()"
+    assert solver.history_pressure is not None, "请先调用 run()"
+
     q_in  = np.mean(solver.history_flow[:, 0])
     q_out = np.mean(solver.history_flow[:, -1])
     print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, diff={q_in-q_out:.3f}")
     # 若 diff 长期显著 > 0，压力下降很可能是质量失衡
 
-    q_mean = np.nanmean(solver.history_flow, axis=0)
-    ffr = q_mean / par.mean_coronary_flow_ml_s()
+    q_mean = np.nanmean(solver.history_flow[1000:, :], axis=0)
+    ffr = q_mean / parameters.mean_coronary_flow_ml_s()
+    ffr = np.clip(ffr, 0, 1)
     return ffr
 
 if __name__ == "__main__":

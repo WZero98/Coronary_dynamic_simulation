@@ -12,7 +12,15 @@
 2. **傅里叶拟合** `fit_fourier_coefficients`：将模板分解为有限项正弦谐波，得到系数 \((n, \text{amp\_ratio}, \text{phase})\)。
 3. **入口流量** `coronary_inlet_flow`：按心率、心输出量等将归一化波形放大为物理流量，并施加非负约束。
 
-在 1D 求解器（`navier_stokes.py`）中，通常通过 `inlet_boundary_condition.py` 导入 `coronary_inlet_flow` 作为入口边界。CGS 单位下 **1 mL = 1 cm³**，数值可与 cm³/s 直接对接。
+在 1D 求解器 **`navier_stokes_1d.py`** 中，通过 `BloodFlowParameters.inlet_flow(t)` 调用 `coronary_inlet_flow` 作为入口边界（定流量 \(Q(0,t)=Q_{\mathrm{in}}(t)\)）。`coronary_outlet.py` 在未提供 `q_in` 时亦默认调用本模块生成驱动流量。CGS 单位下 **1 mL = 1 cm³**，数值可与 cm³/s 直接对接。
+
+> **注意**：`coronary_inlet_flow` 与 `BloodFlowParameters` 的**默认值不完全相同**，求解器中以 `BloodFlowParameters` 为准：
+
+| 参数 | `coronary_inlet_flow` 默认 | `BloodFlowParameters` 默认 |
+|------|---------------------------|----------------------------|
+| 心输出量 | 5.0 L/min | 5.5 L/min |
+| 冠脉分流比例 | 0.045 | 0.03 |
+| 心率 | 75 bpm | 75 bpm |
 
 ### 1.1 数学形式
 
@@ -41,9 +49,16 @@ Q_{\text{mean}} = \frac{\text{cardiac\_output} \times 1000 \times \text{coronary
 设计目标（可通过 `template_peak_metrics` / `coronary_inlet_flow_stats` 校验）：
 
 - **脉动指数 PI** = \((Q_{\max}-Q_{\min})/Q_{\text{mean}}\) 约在 **0.9–1.3**
-- **早期收缩峰 / 舒张峰** ≈ **70%**（由 `systolic_to_diastolic_peak_ratio` 设定）
+- **早期收缩峰 / 舒张峰** 由 `systolic_to_diastolic_peak_ratio` 设定（当前默认 **0.65**）
 - 收缩期末流量高于收缩晚期局部低点（融合，非“先探底再跳升”）
 
+**当前默认参数下的典型指标**（`python coronary_inlet.py` 或下列调用可复现）：
+
+| 指标 | 模板层 `template_peak_metrics` | 傅里叶重建 `coronary_inlet_flow_stats` |
+|------|-------------------------------|----------------------------------------|
+| 早期收缩峰 / 舒张峰 | `peak_ratio` ≈ **0.65** | — |
+| 脉动指数 PI | — | ≈ **1.06** |
+| 舒张期灌注占比 | — | ≈ **69%**（基于 `systolic_duration_frac=0.30` 划分） |
 ---
 
 ## 2. 单周期模板波形结构
@@ -90,8 +105,7 @@ Q_{\text{mean}} = \frac{\text{cardiac\_output} \times 1000 \times \text{coronary
 | `coronary_inlet_flow_stats` | 均值、峰谷、PI、舒张占比等统计 |
 | `plot_coronary_flow` | 可视化模板与傅里叶重建 |
 
-内部函数：`_get_fourier_coefficients`、`_build_default_fourier_coefficients`；模块加载时生成 `_DEFAULT_FOURIER_COEFFICIENTS`。
-
+内部函数：`_get_fourier_coefficients`、`_build_default_fourier_coefficients`；模块加载时使用**预烘焙**的 `_DEFAULT_FOURIER_COEFFICIENTS`（由当前默认模板参数拟合得到，见 §12），避免每次 import 重新拟合。
 ---
 
 ## 4. `coronary_flow_template` — 生理模板（核心）
@@ -99,17 +113,16 @@ Q_{\text{mean}} = \frac{\text{cardiac\_output} \times 1000 \times \text{coronary
 ```python
 coronary_flow_template(
     tau,
-    systolic_duration_frac=0.33,
-    diastolic_peak=1.30,
-    systolic_to_diastolic_peak_ratio=0.50,  # 代码当前默认值，见下表
-    baseline_level=0.20,
+    systolic_duration_frac=0.30,
+    diastolic_peak=1.2,
+    systolic_to_diastolic_peak_ratio=0.65,
+    baseline_level=0.30,
     systolic_early_peak_frac=0.18,
-    junction_flow_frac=0.84,
-    diastolic_peak_frac=0.28,
+    junction_flow_frac=0.85,
+    diastolic_peak_frac=0.3,
     systolic_level=None,
 )
 ```
-
 **输入**
 
 | 参数 | 类型 | 说明 |
@@ -124,18 +137,18 @@ coronary_flow_template(
 
 ### 4.1 模板参数详解（调节重点）
 
-以下参数在**归一化、除以均值之前**作用于幅值；改变后应重新调用 `fit_fourier_coefficients` 或重启 Python 以刷新 `_DEFAULT_FOURIER_COEFFICIENTS`（若依赖默认系数）。
+以下参数在**归一化、除以均值之前**作用于幅值。修改模板参数后须重新 `fit_fourier_coefficients`，并将结果传入 `coronary_inlet_flow(..., fourier_coefficients=...)` 或写入 `BloodFlowParameters.inlet_fourier_coefficients`；否则仍使用模块加载时的预烘焙系数。
 
-#### `systolic_duration_frac`（默认 `0.33`）
+#### `systolic_duration_frac`（默认 `0.30`）
 
 - **含义**：收缩期占整个心动周期的比例 \(\tau_{\text{sys}}\)。
-- **生理**：静息心率下收缩期约 0.33–0.37；心率升高时常缩短。
+- **生理**：静息心率下收缩期约 0.30–0.37；心率升高时常缩短。
 - **调节**：
   - **增大** → 收缩段变长，舒张段变短；舒张期灌注占比通常**下降**。
   - **减小** → 舒张段变长，利于提高舒张灌注占比。
 - **注意**：`diastolic_flow_fraction` 默认用同一阈值划分收缩/舒张，应与模板一致。
 
-#### `diastolic_peak`（默认 `1.30`）
+#### `diastolic_peak`（默认 `1.2`）
 
 - **含义**：舒张期目标峰值幅值（归一化前），近似“舒张早期最高灌注”的相对高度。
 - **调节**：
@@ -143,16 +156,16 @@ coronary_flow_template(
   - **减小** → 波形变平，PI 倾向降低。
 - **与其他参数关系**：`baseline`、`s_peak`、`q_join` 均常以 `diastolic_peak` 为尺度（见下）。
 
-#### `systolic_to_diastolic_peak_ratio`（默认 `0.50`，设计目标常为 `0.70`）
+#### `systolic_to_diastolic_peak_ratio`（默认 `0.65`）
 
 - **含义**：早期收缩峰 \(s_{\text{peak}} = \text{ratio} \times \text{diastolic\_peak}\)（当 `systolic_level is None`）。
-- **生理**：收缩期灌注峰值一般明显低于舒张早期峰值；临床讨论中常用“收缩峰约为舒张峰的 70%”。
+- **生理**：收缩期灌注峰值一般低于舒张早期峰值；临床讨论中常用“收缩峰约为舒张峰的 70%”，当前默认标定为 **65%**。
 - **调节**：
-  - **增大**（如 0.5 → 0.7）→ 早期收缩峰抬高，峰比更接近 70%。
+  - **增大**（如 0.65 → 0.70）→ 早期收缩峰抬高，峰比更接近 70%。
   - **减小** → 收缩期更“扁”，与舒张峰对比更弱。
 - **验证**：用 `template_peak_metrics()['peak_ratio']`（**早期收缩峰 / 舒张峰**，非整个收缩期最大值）。
 
-#### `baseline_level`（默认 `0.20`）
+#### `baseline_level`（默认 `0.30`）
 
 - **含义**：周期最低流量水平，`baseline = baseline_level × diastolic_peak`。
 - **生理**：舒张末期 / 收缩早期的基础灌注底线。
@@ -164,28 +177,27 @@ coronary_flow_template(
 #### `systolic_early_peak_frac`（默认 `0.18`）
 
 - **含义**：早期收缩峰在**收缩期内**的相对位置，\(t_{sp} \in (0.05, 0.45)\)（代码内裁剪）。
-  - 绝对时刻 \(\approx t_{sp} \times \tau_{\text{sys}}\)（如 0.18×0.33 ≈ 周期的 6% 处）。
+  - 绝对时刻 \(\approx t_{sp} \times \tau_{\text{sys}}\)（如 0.18×0.30 ≈ 周期的 5.4% 处）。
 - **生理**：心肌挤压建立后，早期仍可有一小段流量，随后进入融合升支。
 - **调节**：
   - **减小** → 峰更早出现，收缩晚期融合段更长。
   - **增大** → 峰后移，融合段更短，形态更“陡”。
 
-#### `junction_flow_frac`（默认 `0.84`）
+#### `junction_flow_frac`（默认 `0.85`）
 
 - **含义**：收缩期末融合流量 \(q_{\text{join}} = \max(\text{junction\_flow\_frac} \times d_{\text{peak}},\ s_{\text{peak}}+\varepsilon)\)。
 - **生理**：实现“**尚未跌至波谷即与舒张升支衔接**”；期末流量应高于收缩晚期局部低点。
 - **调节**：
-  - **增大**（如 0.84 → 0.90）→ 收缩末更高，与舒张衔接更平滑，但早期峰/舒张峰比会变小（若用全收缩期 max 会误判；应用 `template_peak_metrics`）。
+  - **增大**（如 0.85 → 0.90）→ 收缩末更高，与舒张衔接更平滑，但早期峰/舒张峰比会变小（若用全收缩期 max 会误判；应用 `template_peak_metrics`）。
   - **减小** → 融合点降低；过低可能导致收缩晚期出现相对凹陷。
 - **融合判据**：`flow_at_systole_end > pre_systole_end_local_min`。
 
-#### `diastolic_peak_frac`（默认 `0.28`）
+#### `diastolic_peak_frac`（默认 `0.3`）
 
 - **含义**：舒张期内主峰出现的归一化位置 \(t_{\text{dia,peak}} \in [0.08, 0.55]\)（相对舒张段长度）。
   - 越小 → 峰越早（舒张刚开局即达峰）。
   - 越大 → 峰后移，升支更长。
 - **调节**：影响舒张早期形状及傅里叶高次谐波含量；对 **PI** 有次要影响，对 **舒张灌注时间分布** 影响更明显。
-
 #### `systolic_level`（默认 `None`）
 
 - **含义**：若给定浮点数，则**直接指定**早期收缩峰幅值，覆盖 `systolic_to_diastolic_peak_ratio` 的计算。
@@ -194,7 +206,7 @@ coronary_flow_template(
 ### 4.2 模板参数调节流程（推荐）
 
 1. **固定心率与均值相关参数**（在 `coronary_inlet_flow` 层）：`heart_rate`、`cardiac_output`、`coronary_fraction`。
-2. **先定形态**：`systolic_to_diastolic_peak_ratio` → 0.7，`junction_flow_frac` → 0.82–0.88，确认 `template_peak_metrics` 融合成立。
+2. **先定形态**：`systolic_to_diastolic_peak_ratio` → 0.65–0.70，`junction_flow_frac` → 0.82–0.88，确认 `template_peak_metrics` 融合成立。
 3. **再定脉动**：用 `coronary_inlet_flow_stats` 看 **PI**，通过 `baseline_level`、`diastolic_peak` 微调至 0.9–1.3。
 4. **重拟合谐波**：
    ```python
@@ -202,13 +214,14 @@ coronary_flow_template(
 
    coeffs = tuple(fit_fourier_coefficients(
        n_harmonics=7,
-       systolic_to_diastolic_peak_ratio=0.70,
-       baseline_level=0.20,
+       systolic_to_diastolic_peak_ratio=0.65,
+       baseline_level=0.30,
+       diastolic_peak=1.2,
        # ... 与模板一致的 kwargs
    ))
    Q = coronary_inlet_flow(t, fourier_coefficients=coeffs)
    ```
-5. **避免只改模板不改系数**：默认 `coronary_inlet_flow()` 使用模块加载时的 `_DEFAULT_FOURIER_COEFFICIENTS`；模板参数变更后需显式传入新 `fourier_coefficients` 或重新导入模块。
+5. **避免只改模板不改系数**：默认 `coronary_inlet_flow()` 使用模块加载时的预烘焙 `_DEFAULT_FOURIER_COEFFICIENTS`；模板参数变更后需显式传入新 `fourier_coefficients`，或在 `BloodFlowParameters` 中设置 `inlet_fourier_coefficients`。
 
 ### 4.3 参数耦合简表
 
@@ -216,7 +229,7 @@ coronary_flow_template(
 |------|----------|
 | 提高 PI | ↓ `baseline_level` 或 ↑ `diastolic_peak` |
 | 降低 PI | ↑ `baseline_level` 或 ↓ `diastolic_peak` |
-| 峰比 → 70% | ↑ `systolic_to_diastolic_peak_ratio`（或 `systolic_level`） |
+| 峰比 → 70% | ↑ `systolic_to_diastolic_peak_ratio`（当前默认 0.65，可增至 0.70） |
 | 强化收缩末融合 | ↑ `junction_flow_frac`，保证 `flow_at_systole_end > pre_systole_end_local_min` |
 | 提高舒张灌注占比 | ↓ `systolic_duration_frac`，或略降低收缩段幅值 |
 | 更尖的舒张峰 | ↓ `diastolic_peak_frac` |
@@ -227,7 +240,7 @@ coronary_flow_template(
 ## 5. `template_peak_metrics`
 
 ```python
-template_peak_metrics(tau=None, systolic_duration_frac=0.33, **kwargs)
+template_peak_metrics(tau=None, systolic_duration_frac=0.30, **kwargs)
 ```
 
 **作用**：在归一化模板上计算诊断量，**不经过傅里叶**，用于标定模板形态。
@@ -236,8 +249,7 @@ template_peak_metrics(tau=None, systolic_duration_frac=0.33, **kwargs)
 |--------|------|
 | `systolic_early_peak` | 收缩早期（\(\tau < t_{sp}\cdot\tau_{sys}\)）段最大值 |
 | `diastolic_peak` | 舒张段（\(\tau \ge \tau_{sys}\)）最大值 |
-| `peak_ratio` | `systolic_early_peak / diastolic_peak`（目标 ≈ 0.7） |
-| `flow_at_systole_end` | \(\tau=\tau_{\text{sys}}^{-}\) 处流量（融合点） |
+| `peak_ratio` | `systolic_early_peak / diastolic_peak`（当前默认 ≈ **0.65**） || `flow_at_systole_end` | \(\tau=\tau_{\text{sys}}^{-}\) 处流量（融合点） |
 | `pre_systole_end_local_min` | 收缩晚期（约末 45% 收缩段）局部最小流量 |
 
 **为何不用 `max(整个收缩期)`？** 收缩末融合点往往高于早期收缩峰，用全收缩期 max 会高估“收缩峰”，峰比失真。
@@ -306,15 +318,14 @@ coronary_inlet_flow(
 diastolic_flow_fraction(
     t, heart_rate=75.0, cardiac_output=5.0,
     coronary_fraction=0.045,
-    systolic_duration_frac=0.33,
+    systolic_duration_frac=0.30,
     **kwargs,  # 可传 fourier_coefficients 等
 )
 ```
 
 - **含义**：一个周期内，\(\tau \ge \tau_{\text{sys}}\) 段流量积分占全周期积分比例。
-- **注意**：基于**傅里叶重建**的 \(Q(t)\)，不是模板直接积分；划分收缩/舒张的阈值是 `systolic_duration_frac`，应与模板一致。
-- **生理参考**：文献常述舒张期灌注约占 80–90%；当前模板偏“形态标定”，该比例可能低于 80%，若需提高应缩短 `systolic_duration_frac` 并配合统计复验。
-
+- **注意**：基于**傅里叶重建**的 \(Q(t)\)，不是模板直接积分；划分收缩/舒张的阈值是 `systolic_duration_frac`，应与模板一致（默认 **0.30**）。
+- **生理参考**：文献常述舒张期灌注约占 80–90%；当前默认模板下傅里叶重建的 `diastolic_flow_fraction` 约 **69%**。若需提高应缩短 `systolic_duration_frac` 并配合 `coronary_inlet_flow_stats` 复验。
 ---
 
 ## 9. `coronary_inlet_flow_stats`
@@ -347,7 +358,12 @@ coronary_inlet_flow_stats(
 - 多周期 `coronary_inlet_flow` 曲线；
 - 单周期：傅里叶重建 vs 生理模板（模板乘以 \(Q_{\text{mean}}\) 对比）。
 
-默认 `coronary_fraction=0.025` 与主接口不同，仅影响绘图幅值，不影响默认系数。
+**函数默认参数**（与 `coronary_inlet_flow` 主接口略有不同，仅影响绘图）：
+
+| 参数 | `plot_coronary_flow` 默认 | `coronary_inlet_flow` 默认 |
+|------|---------------------------|----------------------------|
+| `heart_rate` | 65.0 | 75.0 |
+| `coronary_fraction` | 0.03 | 0.045 |
 
 运行：
 
@@ -355,23 +371,12 @@ coronary_inlet_flow_stats(
 python coronary_inlet.py
 ```
 
+`__main__` 会打印当前模板拟合的傅里叶系数、`template_peak_metrics`，并调用 `plot_coronary_flow`（示例使用 `coronary_fraction=0.03`）。
 ---
 
-## 11. 与项目其他文件的衔接
+## 11. 常用代码示例
 
-| 文件 | 关系 |
-|------|------|
-| `inlet_boundary_condition.py` | `from coronary_inlet import coronary_inlet_flow`，兼容旧导入路径 |
-| `navier_stokes.py` | 边界条件中调用 `coronary_inlet_flow(t, heart_rate=...)` |
-| `navier_stokes_使用说明.md` | 求解器总说明；入口流量细节以本文档为准 |
-
-修改模板或系数后，若使用默认谐波，请重新加载模块或显式传入 `fourier_coefficients`。
-
----
-
-## 12. 常用代码示例
-
-### 12.1 检查模板是否满足峰比与融合
+### 11.1 检查模板是否满足峰比与融合
 
 ```python
 from coronary_inlet import template_peak_metrics, coronary_inlet_flow_stats
@@ -383,53 +388,121 @@ s = coronary_inlet_flow_stats()
 print(f"PI={s['pulsatility_index']:.2f}, Q_mean={s['Q_mean_mL_s']:.2f} mL/s")
 ```
 
-### 12.2 自定义模板并用于求解器
+### 11.2 自定义模板并用于求解器
 
 ```python
 import numpy as np
 from coronary_inlet import fit_fourier_coefficients, coronary_inlet_flow
 
 template_kw = dict(
-    systolic_to_diastolic_peak_ratio=0.70,
-    junction_flow_frac=0.84,
-    baseline_level=0.20,
-    diastolic_peak=1.30,
+    systolic_to_diastolic_peak_ratio=0.65,
+    junction_flow_frac=0.85,
+    baseline_level=0.30,
+    diastolic_peak=1.2,
 )
 coeffs = tuple(fit_fourier_coefficients(n_harmonics=7, **template_kw))
 
 t = np.linspace(0, 2, 500)
-Q = coronary_inlet_flow(t, heart_rate=75, fourier_coefficients=coeffs, **{})
+Q = coronary_inlet_flow(t, heart_rate=75, fourier_coefficients=coeffs)
 ```
 
-### 12.3 在 `navier_stokes` 中改入口（概念）
+### 11.3 在 `navier_stokes_1d` 中配置入口
 
-在 `apply_boundary_conditions` 或实例属性中调整 `heart_rate`、`cardiac_output`、`coronary_fraction`；若改模板形态，需在调用处传入与模板一致的 `fourier_coefficients`（或扩展求解器封装该参数）。
+通过 `BloodFlowParameters` 传入，由求解器 `_apply_boundaries` 在 \(x=0\) 施加 \(Q(0,t)=Q_{\mathrm{in}}(t)\)：
 
+```python
+from navier_stokes_1d import BloodFlowParameters, NavierStokes1D
+
+par = BloodFlowParameters(
+    heart_rate_bpm=75.0,
+    cardiac_output_l_per_min=5.5,
+    coronary_flow_fraction=0.03,       # 求解器默认 0.03
+    inlet_min_flow_fraction=0.1,
+    inlet_phase_offset_rad=0.0,
+    inlet_fourier_coefficients=None,   # None → 使用 coronary_inlet 内置系数
+)
+solver = NavierStokes1D(length_cm, nx, par)
+Q_in = par.inlet_flow(t)              # 等价于 coronary_inlet_flow(..., coronary_fraction=0.03)
+```
+
+若修改模板形态，应：
+
+1. `fit_fourier_coefficients(**template_kw)` 得到新系数；
+2. 设置 `inlet_fourier_coefficients=coeffs`；
+3. 保持 `coronary_flow_fraction` 与 Windkessel 标定用的 \(Q_{\mathrm{mean}}\) 一致（见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §5.5）。
+
+初值：`set_lumen_area_profile` 会将沿程流量初值设为 `Q_in(0)`，与入口 BC 对齐。
 ---
 
-## 13. 默认常量速查（`coronary_inlet.py` 当前版本）
+## 12. 默认常量速查（`coronary_inlet.py` 当前版本）
+
+### 12.1 模板参数
 
 | 常量 | 值 | 对应模板参数 |
 |------|-----|----------------|
 | `_DEFAULT_N_HARMONICS` | 7 | `fit_fourier_coefficients` |
-| `_DEFAULT_SYSTOLIC_DURATION_FRAC` | 0.33 | `systolic_duration_frac` |
-| `_DEFAULT_DIASTOLIC_PEAK` | 1.30 | `diastolic_peak` |
-| `_DEFAULT_SYSTOLIC_TO_DIASTOLIC_PEAK_RATIO` | 0.50 | `systolic_to_diastolic_peak_ratio` |
-| `_DEFAULT_BASELINE_LEVEL` | 0.20 | `baseline_level` |
+| `_DEFAULT_SYSTOLIC_DURATION_FRAC` | **0.30** | `systolic_duration_frac` |
+| `_DEFAULT_DIASTOLIC_PEAK` | **1.2** | `diastolic_peak` |
+| `_DEFAULT_SYSTOLIC_TO_DIASTOLIC_PEAK_RATIO` | **0.65** | `systolic_to_diastolic_peak_ratio` |
+| `_DEFAULT_BASELINE_LEVEL` | **0.30** | `baseline_level` |
 | `_DEFAULT_SYSTOLIC_EARLY_PEAK_FRAC` | 0.18 | `systolic_early_peak_frac` |
-| `_DEFAULT_JUNCTION_FLOW_FRAC` | 0.84 | `junction_flow_frac` |
-| `_DEFAULT_DIASTOLIC_PEAK_FRAC` | 0.28 | `diastolic_peak_frac` |
+| `_DEFAULT_JUNCTION_FLOW_FRAC` | **0.85** | `junction_flow_frac` |
+| `_DEFAULT_DIASTOLIC_PEAK_FRAC` | **0.3** | `diastolic_peak_frac` |
 
-若需早期收缩峰/舒张峰 ≈ **70%**，请将 `systolic_to_diastolic_peak_ratio` 设为 **0.70** 并重新拟合傅里叶系数；文档字符串中的“70%”描述的是该参数的生理含义，与代码默认值可能不同步，以你项目中标定后的常量为准。
+### 12.2 预烘焙傅里叶系数 `_DEFAULT_FOURIER_COEFFICIENTS`
+
+由上述默认模板经 `fit_fourier_coefficients(n_harmonics=7)` 拟合得到，模块 import 时直接使用（不再每次重算）。格式：`(n, amp_ratio, phase_rad)`。
+
+| n | amp_ratio | phase_rad |
+|---|-----------|-----------|
+| 1 | 0.448878 | -0.970014 |
+| 2 | 0.076260 | 0.316216 |
+| 3 | 0.060832 | -0.807751 |
+| 4 | 0.028939 | -0.051848 |
+| 5 | 0.031975 | -0.618180 |
+| 6 | 0.025276 | -0.512057 |
+| 7 | 0.021691 | -1.037171 |
+
+修改 `_DEFAULT_*` 模板常量后，应运行 `python coronary_inlet.py` 或 `fit_fourier_coefficients()` 重新生成系数并更新源码中的元组（或仅在调用处传入新 `fourier_coefficients`）。
+
+### 12.3 默认参数下的校验指标（HR=75, CO=5 L/min, fraction=0.045）
+
+| 指标 | 典型值 |
+|------|--------|
+| `template_peak_metrics()['peak_ratio']` | ≈ 0.65 |
+| `coronary_inlet_flow_stats()['pulsatility_index']` | ≈ 1.06 |
+| `coronary_inlet_flow_stats()['diastolic_flow_fraction']` | ≈ 0.69 |
+| `Q_mean_mL_s`（fraction=0.045） | ≈ 3.75 mL/s |
+| `Q_mean_mL_s`（fraction=0.03，求解器默认） | ≈ 2.50 mL/s |
 
 ---
 
-## 14. 参考文献（模块 docstring 延续）
-
+## 13. 参考文献（模块 docstring 延续）
 - Womersley J.R. — 动脉血流理论  
 - Nichols W.W., O'Rourke M.F. — *McDonald's Blood Flow in Arteries*  
 - Kim H.J. et al. — 患者特异性冠脉血流建模  
 
 ---
 
-*文档版本：与 `coronary_inlet.py` 分段模板 + 傅里叶拟合实现对应。若代码默认常量更新，请同步修改第 13 节表格。*
+## 14. 文件关系速查
+
+```text
+FFR_1D/
+├── coronary_inlet.py           # 本模块 ★
+├── docs/coronary_inlet_说明.md # 本文档
+├── navier_stokes_1d.py         # 1D 求解器（BloodFlowParameters.inlet_flow）
+├── coronary_outlet.py          # 出口 Windkessel（默认 q_in 来自本模块）
+└── coronary_constants.py       # 共享常量（P_ref 等）
+```
+
+**数据流（耦合求解）**：
+
+```text
+BloodFlowParameters  →  inlet_flow(t)  →  coronary_inlet_flow(...)
+                              ↓
+                    NavierStokes1D: Q(0,t) = Q_in(t)
+```
+
+---
+
+*文档版本：与 `coronary_inlet.py` 分段模板 + 傅里叶拟合实现对应；与 `navier_stokes_1d.BloodFlowParameters` 入口封装同步。若代码默认常量更新，请同步修改 §12。*

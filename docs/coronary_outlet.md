@@ -554,17 +554,34 @@ windkessel3_outlet_pressure(t, q, p_wk_init_mmhg=75.0)
 
 ---
 
-## 9. 与 CFD 求解器的对接思路
+## 9. 与 1D 求解器的对接思路
 
-本模块输出的是**标量出口边界** \(P_{\mathrm{out}}(t)\)，不含空间分布。与 `demo/navier_stokes.py` 耦合时常见两种方式：
+本模块输出的是**标量出口边界** \(P_{\mathrm{out}}(t)\) 或 Windkessel 参数约定，不含空间分布。
+
+### 9.1 与 `navier_stokes_1d.py`（推荐）
+
+根目录 **`navier_stokes_1d.py`** 已在线耦合 Windkessel + tube law：
+
+| 角色 | 实现 |
+|------|------|
+| 驱动流量 | \(Q_{\mathrm{drive}} = Q(L)\)，出口管腔 PDE 流量 |
+| 出口管腔压 | `P_lumen` 来自 ODE 状态，经 `area_from_lumen_pressure_mmhg` 得 \(A(L)\) |
+| 管腔 \(Q(L)\) | **不由** \(P_{\mathrm{wk}}/R_d\) 强制，由 1D PDE 与入口传播决定 |
+| 离线参考 | `NavierStokes1D.reference_outlet_pressure(t, par)` 调用本模块 `windkessel2/3_outlet_pressure` |
+
+详见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §5.2、§11。
+
+### 9.2 与 `demo/navier_stokes.py`（早期原型）
+
+`demo/` 为旧原型，接口不同，**勿与根目录求解器混用**。历史上常见两种方式：
 
 1. **Dirichlet 压力边界**  
-   将 `P_out(t)` 插值到求解器时间步，在出口施加管腔压；截面积可由 tube law 反解（参见 `demo/outlet_boundary_condition.area_from_pressure_mmhg`）。
+   将 `P_out(t)` 插值到求解器时间步，在出口施加管腔压；截面积由 tube law 反解。
 
 2. **0D–1D 耦合**  
-   每步用管腔流量 \(Q_{\mathrm{lumen}}\) 推进 Windkessel（demo 中 `RCWindkesselMurrayOutletBC.advance`）；本模块适合**预先验证**参数或生成参考曲线。
+   每步用管腔流量推进 Windkessel（demo 中 `RCWindkesselMurrayOutletBC.advance`）；本模块适合**预先验证**参数或生成参考曲线。
 
-**注意**：demo 出口边界同时含 Murray 分配与血压匹配；本模块为**单出口、单路** Windkessel，不包含 Murray 多分支分配。
+**注意**：demo 出口边界含 Murray 多分支分配；本模块为**单出口、单路** Windkessel。
 
 ---
 

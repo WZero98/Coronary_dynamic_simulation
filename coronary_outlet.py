@@ -401,16 +401,13 @@ def plot_coronary_outlet_pressure(
         cardiac_output=cardiac_output,
         coronary_fraction=coronary_fraction,
     )
-    wk_kw = dict(
-        r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
-        compliance_ml_per_mmhg=compliance_ml_per_mmhg,
-    )
-    p2 = windkessel2_outlet_pressure(t, q, **wk_kw)
+    p2 = windkessel2_outlet_pressure(t, q, r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml, compliance_ml_per_mmhg=compliance_ml_per_mmhg)
     p3, p_wk3 = windkessel3_outlet_pressure(
         t,
         q,
         r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml,
-        **wk_kw,
+        r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
+        compliance_ml_per_mmhg=compliance_ml_per_mmhg,
     )
 
     stats2 = coronary_outlet_pressure_stats(
@@ -418,7 +415,8 @@ def plot_coronary_outlet_pressure(
         cardiac_output=cardiac_output,
         coronary_fraction=coronary_fraction,
         model="2wk",
-        **wk_kw,
+        r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
+        compliance_ml_per_mmhg=compliance_ml_per_mmhg,
     )
     stats3 = coronary_outlet_pressure_stats(
         heart_rate=heart_rate,
@@ -426,7 +424,8 @@ def plot_coronary_outlet_pressure(
         coronary_fraction=coronary_fraction,
         model="3wk",
         r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml,
-        **wk_kw,
+        r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
+        compliance_ml_per_mmhg=compliance_ml_per_mmhg,
     )
 
     period = 60.0 / heart_rate
@@ -459,9 +458,11 @@ def plot_coronary_outlet_pressure(
         cardiac_output=cardiac_output,
         coronary_fraction=coronary_fraction,
     )
-    p2_one = windkessel2_outlet_pressure(t_one, q_one, **wk_kw)
+    p2_one = windkessel2_outlet_pressure(t_one, q_one, r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
+        compliance_ml_per_mmhg=compliance_ml_per_mmhg,)
     p3_one, _ = windkessel3_outlet_pressure(
-        t_one, q_one, r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml, **wk_kw
+        t_one, q_one, r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml, r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
+        compliance_ml_per_mmhg=compliance_ml_per_mmhg,
     )
     ax2.plot(t_one, p2_one, "C0", lw=2, label="二元 WK")
     ax2.plot(t_one, p3_one, "C1", lw=2, label="三元 WK")
@@ -510,11 +511,6 @@ if __name__ == "__main__":
     p3, p_wk = coronary_outlet_pressure(
         t, model="3wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac,
         r_distal_mmhg_s_per_ml=r_d,
-    )
-    print(f"时间点数: {len(t)}, P2 range [{p2.min():.1f}, {p2.max():.1f}] mmHg")
-    print(
-        f"P3 range [{p3.min():.1f}, {p3.max():.1f}] mmHg, "
-        f"P_wk range [{p_wk.min():.1f}, {p_wk.max():.1f}] mmHg"
     )
 
     plot_coronary_outlet_pressure(

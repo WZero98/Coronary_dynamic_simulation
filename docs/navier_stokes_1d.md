@@ -26,7 +26,7 @@
 
 ## 1. 概述
 
-`navier_stokes_1d.py` 实现**单支冠状动脉**在轴向 \(x \in [0, L]\) 上的一维可变形管血流传播。以截面积 \(A(x,t)\) 与体积流量 \(Q(x,t)\) 为求解变量，管壁压力由弹性 tube law 闭合，入口/出口边界分别由专用模块提供。
+`navier_stokes_1d.py` 实现**单支冠状动脉**在轴向 \(x \in [0, L]\) 上的一维可变形管血流传播。以截面积 \(A(x,t)\) 与体积流量 \(Q(x,t)\) 为求解变量，**管腔标量压** \(p(x,t)\) 由弹性 tube law 从 \(A\) 闭合，入口/出口边界分别由专用模块提供。
 
 | 项目 | 说明 |
 |------|------|
@@ -80,7 +80,7 @@ U = \begin{bmatrix} A \\ Q \end{bmatrix}
 \]
 
 \[
-F = \begin{bmatrix} Q \\ \dfrac{\alpha Q^2}{A} + \dfrac{p(A)\,A}{\rho} \end{bmatrix},
+F = \begin{bmatrix} Q \\ \dfrac{\alpha Q^2}{A} + \dfrac{A}{\rho}p(A) \end{bmatrix},
 \quad
 S = \begin{bmatrix} 0 \\ -\dfrac{8\pi\mu Q}{A} \end{bmatrix}
 \]
@@ -103,18 +103,28 @@ p(A, x) = P_{\mathrm{ref}} + \beta(x)\,\bigl(\sqrt{A} - \sqrt{A_0(x)}\bigr)
 \]
 
 - \(A_0(x)\)：用户给定的**参考管腔面积**（无应力或影像分割得到的基线面积）
-- \(\beta(x)\)：管壁刚度（mmHg / √cm）
+- \(\beta(x)\)：管壁刚度（mmHg / cm）
 - \(P_{\mathrm{ref}}\)：参考压力（默认 `coronary_constants.P_INLET_REF_MMHG`，80 mmHg）
 
 **压力不单独求解散射方程**，每个时间步由当前 \(A\) 通过上式在网格中心得到 \(p_i\)。
 
-小扰动压力波速：
+#### 3.2.1 管腔压 \(p\) 的物理含义
+
+\(p\) 是**各向同性的热力学标量压**（mmHg），**不是**轴向或径向的应力矢量分量，也**不应**与「垂直于截面（轴向）」或「管壁法向（径向）」混为一谈——后两者在几何上互相垂直。
+
+| 用途 | 机制 |
+|------|------|
+| **tube law** | 将标量 \(p\) 与截面积 \(A\) 耦合，描述管腔**径向胀缩**（壁弹性） |
+| **动量通量** \(\partial(pA/\rho^*)/\partial x\) | 沿 \(x\) 的**压力梯度**驱动轴向体积流量 \(Q\) |
+| **`pressure[i]`** | 轴向位置 \(x_i\) 处的管腔压取值；`p(x)` 表示沿程分布，非方向性矢量 |
+
+小扰动压力波速（与 §4.3 CFL 及 `_wave_speed` 一致）：
 
 \[
-c(A) = \sqrt{\frac{2\beta\sqrt{A}}{\rho}}
+c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
+\qquad
+\rho^* = \rho / 1333.22 \;\text{（mmHg 动量耦合有效密度）}
 \]
-
-（\(\beta\) 在公式中已换算为 cgs。）
 
 ### 3.3 默认单位制（CGS + mmHg 展示）
 
@@ -126,7 +136,7 @@ c(A) = \sqrt{\frac{2\beta\sqrt{A}}{\rho}}
 | 入口模块输出 | mL/s（**1 mL = 1 cm³**，数值与 cm³/s 一致） |
 | 密度 \(\rho\) | g/cm³（默认 1.05） |
 | 粘度 \(\mu\) | cm²/s |
-| 压力 \(p\)（存储与绘图） | mmHg |
+| 压力 \(p\)（`pressure`、`history_pressure`） | mmHg；沿 \(x\) 各点的**管腔标量压**，非方向分量 |
 | 时间 \(t\) | s |
 
 ---
@@ -156,14 +166,77 @@ U^{n+1} &= \mathrm{BC}\left(\tfrac{1}{2}U^n + \tfrac{1}{2}\bigl(U^{(1)} + \Delta
 
 ### 4.3 CFL 条件
 
+时间步长由 **CFL（Courant–Friedrichs–Lewy）条件**自适应选取，保证显式双曲部分（对流 + 弹性波）在数值上稳定。实现见 `NavierStokes1D._stable_timestep` 与 `_wave_speed`。
+
 \[
 \Delta t = \min\left(
-  \mathrm{CFL}\cdot\frac{\Delta x}{\max_x(|u|+c)},\;
+  \mathrm{CFL}\cdot\frac{\Delta x}{\lambda_{\max}},\;
   \Delta t_{\max}
-\right)
+\right),
+\qquad
+\lambda_{\max} = \max_{x}\bigl(\,|u(x)| + c(x)\,\bigr)
 \]
 
-默认 `cfl=0.5`，`dt_max_s=5×10⁻⁴` s。
+#### 公式中各符号
+
+| 符号 | 含义 | 单位 | 代码/来源 |
+|------|------|------|-----------|
+| \(\Delta x\) | 轴向网格间距 \(L/(n_x-1)\) | cm | `solver.dx` |
+| \(u(x)\) | **轴向流体速度**，\(u = Q/A\) | cm/s | `state[1] / state[0]` |
+| \(c(x)\) | **小扰动弹性波速**（管壁顺应性引起的压力–面积波沿 \(x\) 传播的速度） | cm/s | `_wave_speed` |
+| \(\lambda_{\max}\) | 全网格上特征速度上界 \(\|u\|+c\) 的最大值 | cm/s | `np.max(np.abs(u) + c)` |
+| \(\mathrm{CFL}\) | 稳定性安全系数，\(0<\mathrm{CFL}\lesssim 1\) | — | `BloodFlowParameters.cfl`（默认 0.5） |
+| \(\Delta t_{\max}\) | 时间步**硬上限**（避免单步过大、便于与 Windkessel 耦合） | s | `BloodFlowParameters.dt_max_s`（默认 \(5\times10^{-4}\)） |
+
+#### \(u\)：对流速度
+
+\[
+u = \frac{Q}{A}
+\]
+
+- \(Q\)：该网格点的体积流量（cm³/s）
+- \(A\)：该网格点的管腔截面积（cm²）
+- \(u\) 描述**血液沿血管轴向 \(x\) 方向的输运**；\(|u|\) 越大，信息沿 \(x\) 传播越快，所需 \(\Delta t\) 越小
+
+#### \(c\)：弹性波速
+
+由 tube law 线性化得到的小扰动波速（与 HLL 求解器中 `_wave_speed` 一致）：
+
+\[
+c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
+\qquad
+\rho^* = \frac{\rho}{1333.22}
+\]
+
+| 量 | 说明 |
+|----|------|
+| \(\beta(x)\) | 管壁刚度（mmHg/√cm）；\(\beta\) 越大 → 管壁越硬 → \(c\) 越大 |
+| \(A\) | 当前截面积（cm²） |
+| \(\rho\) | 血液密度（g/cm³，默认 1.06） |
+| \(\rho^*\) | 与 mmHg 制管腔压配对的**动量有效密度**（`momentum_rho()`） |
+
+物理上，\(c\) 刻画**压力扰动沿管轴传播**的快慢：顺应性越小（\(\beta\) 越大）或管腔越大，波速越高，CFL 对 \(\Delta t\) 的限制越严。
+
+#### 为何取 \(|u|+c\)
+
+一维可变形管方程在双曲意义下有两族特征线，其有效传播速度约为 \(u \pm c\)。CFL 条件要求在一个时间步内，对流与弹性波**不应跨越超过约一个网格单元**：
+
+\[
+\Delta t \lesssim \frac{\Delta x}{|u| + c}
+\]
+
+取全网格 \(\max_x(|u|+c)\) 作为最严格（最小 \(\Delta t\)）的约束；再乘以 \(\mathrm{CFL}<1\) 留出数值安全裕度（MUSCL–HLL + SSP-RK2 仍建议 \(\mathrm{CFL}\approx 0.35\)–\(0.5\)）。
+
+#### 默认参数与调参
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `cfl` | 0.5 | 减小可抑制振荡、提高稳定性，但步数增多 |
+| `dt_max_s` | \(5\times10^{-4}\) s | 即使 \(\lambda_{\max}\) 很小也不超过此步长 |
+
+**典型量级**（冠脉尺度）：\(u \sim 10\)–\(50\) cm/s，\(c \sim 10\)–\(30\) cm/s，\(\Delta x \sim 0.05\)–\(0.2\) cm → \(\Delta t\) 常为 \(10^{-4}\)–\(10^{-3}\) s 量级，常由 `dt_max_s` 截断。
+
+**退化情况**：若 \(\lambda_{\max} < 10^{-14}\)（近乎静止），代码回退 \(\Delta t = 10^{-4}\) s，避免除零。
 
 ---
 
@@ -212,16 +285,30 @@ P_{\mathrm{lumen}} = P_{\mathrm{wk}} + R_p\, Q_{\mathrm{drive}}
 其中：
 
 \[
-Q_{\mathrm{drive}} = Q_{\mathrm{lumen,out}}
+Q_{\mathrm{drive}} = Q(L)
 \]
 
-（取末端管腔流量，强调管腔–微循环质量守恒；代码中保留 `(Q_in + Q_lumen)/2` 的注释备选。）
+即 Windkessel ODE 由**出口管腔 PDE 流量**驱动，实现 0D–1D 质量闭合。
 
-出口边界施加：
+\[
+Q_{\mathrm{venous}} = \frac{P_{\mathrm{wk}}}{R_d}
+\]
+
+仅在 \(dP_{\mathrm{wk}}/dt=0\) 时才有 \(Q(L) \approx Q_{\mathrm{venous}}\)；脉动过程中二者可分离。
+
+出口边界施加（`_apply_boundaries`）：
 
 ```text
-Q_out  ← Windkessel 闭合（P_wk / R_d）
-A_out  ← tube law 反解，使 p(A_out) = P_lumen
+Q(L)   ← 保留 PDE 演化值（不强制为 P_wk/R_d）
+A(L)   ← tube law 反解，使 p(A(L)) = P_lumen
+P_wk   ← 步末 advance：C·dP_wk/dt = Q_drive − P_wk/R_d
+```
+
+**物理回路**：
+
+```text
+入口 Q_in(t) ──► 1D 管腔 PDE ──► Q(L) ──► Windkessel(C, P_wk) ──► Q_venous = P_wk/R_d ──► 静脉
+                                      └──► P_lumen ──► A(L) via tube law
 ```
 
 默认 \(R_d = P_{\mathrm{ref}} / Q_{\mathrm{mean}}\)，\(R_p = 0.12\, R_d\)（与 `coronary_outlet` 默认标定一致）。详见 [`coronary_outlet.md`](coronary_outlet.md)。
@@ -256,8 +343,9 @@ flowchart LR
         direction TB
         WK["P_wk  ✓ ODE state"]
         OUT_P["P_lumen = f(P_wk, Q_drive)  ✓ prescribed"]
-        OUT_Q["Q_out = P_wk / R_d  ✓ prescribed"]
-        OUT_A["A_out = inv_tube_law(P_lumen)  derived"]
+        OUT_Q["Q(L)  ✓ free (PDE)"]
+        OUT_QV["Q_venous = P_wk/R_d  ◇ diagnostic"]
+        OUT_A["A(L) = inv_tube_law(P_lumen)  derived"]
     end
 
     IN -->|"HLL 通量传播"| INT
@@ -270,7 +358,7 @@ flowchart LR
 |------|------|
 | prescribed（图中红色节点） | 边界**直接强制**的变量 |
 | free（图中绿色节点） | **内部自由度**，由 PDE 时间推进 |
-| derived（图中紫色节点） | **派生量**：每步由 tube law 从 \(A\) 算出，不单独求解 |
+| derived（图中紫色节点） | **派生量**：每步由 tube law 从 \(A\) 得到标量 \(p\)，不单独求解 |
 | extrapolated / ODE state（图中黄色节点） | \(A_0\) 外推、或 Windkessel 状态 \(P_{\mathrm{wk}}\) |
 
 #### 5.4.2 1D 管段上的变量角色
@@ -279,18 +367,19 @@ flowchart LR
   入口 x=0              内部单元 j=1…nx−2              出口 x=L
   ─────────            ─────────────────────           ─────────
        │                        │                          │
-  Q ───●─── prescribed          ○─── free                   ●─── prescribed
-       │    Q_in(t)             │   evolve by              │   P_wk/R_d
-       │                        │   −∂F/∂x+S               │
+  Q ───●─── prescribed          ○─── free                   ○─── free (PDE)
+       │    Q_in(t)             │   evolve by              │   Q(L) 保留
+       │                        │   −∂F/∂x+S               │   不强制 P_wk/R_d
   A ───○─── extrapolated        ○─── free                   ○─── derived
-       │    A₀=A₁               │                          │   from P_lumen
+       │    A₀=A₁               │                          │   A(L) from P_lumen
        │                        │                          │
-  p ───◇─── derived             ◇─── derived                ◇─── drives A_out
+  p ───◇─── derived             ◇─── derived                ◇─── drives A(L)
        │    tube law            │   tube law               │   via inv tube law
        │                        │                          │
        │                        │                    P_wk ──●── ODE state
+       │                        │                    Q_venous= P_wk/R_d (0D 出流)
        │                        │                          │   C·dP_wk/dt =
-       │                        │                          │   Q_drive−P_wk/Rd
+       │                        │                          │   Q_drive−Q_venous
        ▼                        ▼                          ▼
    F(U₀) 边界通量          F̂_{j+1/2} HLL 内通量         F(U_{n−1}) 边界通量
 ```
@@ -303,34 +392,34 @@ flowchart LR
 |------|-------|-------|-------|----------|
 | **入口** \(j=0\) | 外推 \(A_1\) | **\(Q_{\mathrm{in}}(t)\)** | tube law | `_apply_boundaries` |
 | **内部** \(j=1…n{-}2\) | **自由** | **自由** | tube law | SSP-RK2 + HLL + 源项 |
-| **出口** \(j=n{-}1\) | **反解**（配 \(P_{\mathrm{lumen}}\)） | **\(P_{\mathrm{wk}}/R_d\)** | **\(P_{\mathrm{lumen}}\)** | Windkessel + `_apply_boundaries` |
+| **出口** \(j=n{-}1\) | **反解** \(A(L)\)（配 \(P_{\mathrm{lumen}}\)） | **自由** \(Q(L)\)（PDE） | **\(P_{\mathrm{lumen}}\)** | Windkessel + tube law |
 
-**内部自由度总数**：\(2(n_x - 2)\)（每个内部点的 \(A_j,\,Q_j\) 各 1 个）。边界各占用 2 个分量，但并非 4 个独立自由变量——入口主要约束 \(Q\)，出口主要经 Windkessel 约束 \(P/Q\)。
+**内部自由度总数**：\(2(n_x - 2)\)（每个内部点的 \(A_j,\,Q_j\) 各 1 个）。入口主要约束 \(Q\)；出口经 Windkessel 约束 \(P_{\mathrm{lumen}}\) 与 \(A(L)\)，**不**强制 \(Q(L)=P_{\mathrm{wk}}/R_d\)。
 
 #### 5.4.4 出口 Windkessel 与管腔的耦合
 
 ```mermaid
 flowchart TB
-    QLO["Q_lumen = U[1,-1] 出口管腔"]
-    QDRV["Q_drive = Q_lumen"]
+    QLO["Q_lumen = U[1,-1] 出口管腔 PDE"]
+    QDRV["Q_drive = Q(L)"]
     ODE["C · dP_wk/dt = Q_drive − P_wk/R_d"]
     PWK["P_wk"]
     PLUM["P_lumen = P_wk + Rp·Q_drive  (3wk)"]
-    QOUT["Q_out = P_wk / R_d"]
-    AOUT["A_out = area_from_lumen_pressure(P_lumen)"]
+    QVEN["Q_venous = P_wk / R_d  (微循环出流)"]
+    AOUT["A(L) = area_from_lumen_pressure(P_lumen)"]
 
     QLO --> QDRV
     QDRV --> ODE
     ODE --> PWK
     PWK --> PLUM
-    PWK --> QOUT
+    PWK --> QVEN
     PLUM --> AOUT
-    QOUT --> UOUT["U[-1] = [A_out, Q_out]"]
-    AOUT --> UOUT
+    AOUT --> UOUT["U[-1] = [A(L), Q(L)]"]
+    QLO --> UOUT
     UOUT --> QLO
 ```
 
-\(Q_{\mathrm{lumen,out}}\) 既是内部演化结果，又经 \(Q_{\mathrm{drive}}\) 反馈到 Windkessel ODE，形成**边界–内部耦合环**。
+\(Q(L)\) 由 1D PDE 与入口 \(Q_{\mathrm{in}}(t)\) 经沿程传播决定，再经 \(Q_{\mathrm{drive}}\) 反馈到 Windkessel；\(P_{\mathrm{lumen}}\) 经 tube law 闭合 \(A(L)\)。**勿将 \(Q_{\mathrm{venous}}=P_{\mathrm{wk}}/R_d\) 写入 \(Q(L)\)**，否则破坏 0D–1D 质量闭合。
 
 #### 5.4.5 一个 SSP-RK2 步内边界何时介入
 
@@ -345,7 +434,7 @@ sequenceDiagram
 
     Note over S,WK: 子步 1
     S->>BC: BC(state, advance=False)
-    Note right of BC: 入口 Q_in<br/>出口 Q_out=P_wk/Rd<br/>P_wk 不积分
+    Note right of BC: 入口 Q_in<br/>出口只改 A(L)<br/>Q(L) 保留 PDE 值
     BC->>L: u0
     L->>L: k0 = −∂F/∂x + S
     L->>BC: u1 = clip(u0 + dt·k0)
@@ -354,28 +443,28 @@ sequenceDiagram
     Note over S,WK: 子步 2（步末）
     L->>L: k1 from u1
     L->>BC: state* = 0.5·u0 + 0.5·(u1+dt·k1)
-    BC->>WK: advance(dt, Q_lumen, Q_in)
-    Note right of WK: 仅此处更新 P_wk
-    WK->>BC: Q_out, P_lumen
-    BC->>S: state^{n+1}
+    BC->>WK: advance(dt, Q_lumen)
+    Note right of WK: 更新 P_wk；返回 P_lumen
+    WK->>BC: P_lumen
+    BC->>S: state^{n+1} [A(L) updated, Q(L) unchanged]
 ```
 
 #### 5.4.6 快速记忆
 
 ```text
-        prescribed          free              prescribed
-           │                  │                    │
-    Q_in ──┤                  │              P_wk/R_d ── Q_out
-           │                  │                    │
-           │            A_j, Q_j  evolve            │
-           │                  │                    │
-    A←A₁ ──┤                  │         P_lumen ──→ A_out
-           │                  │                    │
-           └────── 双曲 PDE + 源项 传播 ──────────┘
+        prescribed          free                 free + derived
+           │                  │                         │
+    Q_in ──┤                  │                    Q(L) PDE 演化
+           │                  │                         │
+           │            A_j, Q_j  evolve                 │
+           │                  │                         │
+    A←A₁ ──┤                  │         P_lumen ──→ A(L)
+           │                  │              P_wk/R_d = Q_venous (0D only)
+           └────── 双曲 PDE + 源项 传播 ───────────────┘
                          tube law → p_j  everywhere
 ```
 
-**一句话**：入口像**脉动流量泵**（只推 \(Q\)），出口像**带顺应性的微循环储器**（用 \(P_{\mathrm{wk}}\) 与 \(R_d\) 控制出流和远端压力）；二者经管内双曲 PDE 耦合，tube law 把面积变化转为各点显示压力 \(p_j\)。
+**一句话**：入口为**定流量泵** \(Q_{\mathrm{in}}(t)\)；出口为 **Windkessel 定压（经 tube law 转为 \(A(L)\)）**，管腔流量 \(Q(L)\) 由 PDE 与入口经沿程传播耦合；微循环侧出流 \(Q_{\mathrm{venous}}=P_{\mathrm{wk}}/R_d\) 仅出现在 0D ODE 中。
 
 ### 5.5 初值与模块耦合
 
@@ -558,6 +647,8 @@ lesions=[(12.0, 18.0, 0.65, 4.5)]
 | `outlet_compliance_ml_per_mmhg` | 0.08 | 顺应性 \(C\) |
 | `outlet_proximal_fraction` | 0.12 | 三元模型近端阻力比例 |
 
+Windkessel ODE 驱动流量固定为出口管腔流量 \(Q(L)\)，无额外配置项。
+
 ---
 
 ## 9. 求解器 `NavierStokes1D`
@@ -578,7 +669,7 @@ NavierStokes1D(
 | `x` | 节点坐标 (cm)，shape `(nx,)` |
 | `area_ref`, `beta` | 参考几何，shape `(nx,)` |
 | `state` | 守恒变量 `[A, Q]`，shape `(2, nx)` |
-| `pressure` | 当前步压力 (mmHg)，shape `(nx,)` |
+| `pressure` | 沿程管腔标量压 \(p(x)\) (mmHg)，shape `(nx,)`；由 tube law 从 \(A\) 派生 |
 | `time` | 当前物理时间 (s) |
 
 ### 9.2 `run(duration_s, record_interval_steps=20)`
@@ -589,7 +680,7 @@ NavierStokes1D(
 |------|--------|------|
 | `history_area` | `(n_save, nx)` | \(A\) 历史 |
 | `history_flow` | `(n_save, nx)` | \(Q\) 历史 |
-| `history_pressure` | `(n_save, nx)` | \(p\) 历史 (mmHg) |
+| `history_pressure` | `(n_save, nx)` | 管腔标量压 \(p\) 历史 (mmHg) |
 | `history_time` | `(n_save,)` | 保存时刻 (s) |
 
 同时写入对象属性 `solver.history_*`。保存帧数约为 `1 + floor(n_steps / record_interval_steps)`。
@@ -602,7 +693,7 @@ NavierStokes1D(
 
 | 函数 | 说明 |
 |------|------|
-| `lumen_pressure_mmhg(A, A0, beta, p_ref)` | 由面积算压力 |
+| `lumen_pressure_mmhg(A, A0, beta, p_ref)` | tube law：由 \(A\) 算管腔标量压 |
 | `area_from_lumen_pressure_mmhg(p, A0, beta, p_ref)` | tube law 反解 \(A\) |
 
 ---
@@ -648,7 +739,7 @@ np.savez(
 \text{ratio} = \frac{\langle p \rangle_{x,\,t}}{p_{\mathrm{mean}}(x=0)}
 \]
 
-其中 \(\langle p \rangle_{x,\,t}\) 为各网格点在**全部保存时刻**上的时间平均后，再与入口网格平均压之比（见源码：先 `mean(history_pressure, axis=0)`，再除以 `p_mean[0]`）。
+其中 \(\langle p \rangle_{x,\,t}\) 为各网格点在**全部保存时刻**上的时间平均管腔标量压，再与入口网格平均压之比（见源码：先 `mean(history_pressure, axis=0)`，再除以 `p_mean[0]`）。比较的是**沿 \(x\) 不同位置**的 \(p\)，非某一方向的应力分量。
 
 > 与临床导管 FFR（远端/主动脉压比）定义不同，仅用于模型内相对比较；正式分析建议自定义近端/远端分区或取狭窄远心端网格。
 
@@ -658,13 +749,24 @@ np.savez(
 
 `NavierStokes1D.reference_outlet_pressure(times, parameters, q_override=None)` 调用 `coronary_outlet` 的 `windkessel2_outlet_pressure` / `windkessel3_outlet_pressure`，在**给定流量序列**下离线积分得到参考 \(P_{\mathrm{out}}(t)\)，**不参与**耦合求解。
 
+离线模型以 **`Q_in(t)`** 驱动 Windkessel（无 1D 管腔、无沿程延迟）；耦合求解以 **`Q(L)`** 驱动。二者驱动方式不同，耦合结果含沿程传播，与离线曲线会有相位/幅值差异，属预期行为。
+
 ```python
 t = np.linspace(0, 2.0, 2000)
 p_ref = NavierStokes1D.reference_outlet_pressure(t, par)
 # 三元模型返回 (p_out, p_wk)
 ```
 
-用途：检查入口波形 + Windkessel 参数是否合理，或与 `solver.history_pressure[:, -1]` 对比出口压振荡。
+用途：检查 Windkessel 参数；与 `solver.history_pressure[:, -1]` 对比。耦合良好时相关系数通常 \> 0.99。
+
+**质量守恒诊断**（`_demo` 中已有）：
+
+```python
+q_in  = np.mean(solver.history_flow[:, 0])
+q_out = np.mean(solver.history_flow[:, -1])
+print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
+# 修复后 |Q(L)−Q[-2]| 应很小；勿将 Q(L) 与 outlet.p_wk/outlet.r_d 逐点对比
+```
 
 ---
 
@@ -719,6 +821,12 @@ A：先插值 `area`/`beta` 到网格，再对 `lesions` 区间做乘法修正�
 
 **Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
 A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 仍用 \(Q_{\mathrm{mean}} R_d\) 稳态标定，与 tube law 的 \(P_{\mathrm{ref}}\) 对齐。
+
+**Q：`pressure` 是沿 x 轴方向的压力吗？**  
+A：否。\(p\) 是各向同性**标量**管腔压（mmHg），`pressure[i]` 只是位置 \(x_i\) 处的取值。tube law 将其与 \(A\) 耦合（径向胀缩）；动量方程中 \(\partial(pA)/\partial x\) 体现沿 \(x\) 的压力梯度对轴向流量 \(Q\) 的驱动。详见 [§3.2.1](#321-管腔压-p-的物理含义)。
+
+**Q：出口 `Q(L)` 为何不等于 `P_wk/R_d`？**  
+A：\(P_{\mathrm{wk}}/R_d\) 是 Windkessel **微循环侧出流** \(Q_{\mathrm{venous}}\)，不是管腔出口流量。耦合求解中 \(Q(L)\) 由 1D PDE 保留；仅当 \(dP_{\mathrm{wk}}/dt=0\) 时两者接近。详见 [§5.2](#52-出口xlwindkessel-耦合)。
 
 ---
 
