@@ -211,11 +211,11 @@ class BloodFlowParameters:
     alpha: float = 1.1  # 动量修正系数（层流常取 1.1）
     mu: float = 0.0035  # 血液粘度 (cm²/s)
     cfl: float = 0.8  # 数值稳定性参数 CFL
-    dt_max_s: float = 2e-4  # 时间步上限 (s)
+    dt_max_s: float = 4e-4  # 时间步上限 (s)
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 1500  # 默认β，越大表示管腔越硬（管壁刚度）
+    beta_mmhg_per_sqrt_cm: float = 3000  # 默认β，越大表示管腔越硬（管壁刚度）
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
@@ -229,7 +229,7 @@ class BloodFlowParameters:
     outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
     outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
-    outlet_compliance_ml_per_mmhg: float = 0.08  # 血管顺应性，越大顺应性越好 
+    outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
     outlet_proximal_fraction: float = 0.12  # 三元模型近端阻力比例
 
     def mean_coronary_flow_ml_s(self) -> float:
@@ -276,7 +276,7 @@ class BloodFlowParameters:
         return rho_for_mmhg_pressure_coupling(self.rho)
 
 
-class _OutletWindkesselState:
+class OutletWindkesselState:
     """
     与 coronary_outlet 中 Windkessel ODE 一致的出口状态机。
 
@@ -381,7 +381,7 @@ class NavierStokes1D:
         self.state = np.zeros((2, self.nx))  # U = [A(x, t), Q(x, t)] 状态变量
         self.pressure = np.zeros(self.nx)  # p(x,t) 管腔标量压 (mmHg)，沿 x 各点取值；非方向性矢量
 
-        self.outlet = _OutletWindkesselState(self.paras)  # 出口状态
+        self.outlet = OutletWindkesselState(self.paras)  # 出口状态
         self.time = 0.0
         self._outlet_dt = 0.0
 
@@ -466,7 +466,7 @@ class NavierStokes1D:
         u = state.copy()  #[A, Q]
         q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
 
-        u[0, 0] = u[0, 1]
+        # u[0, 0] = u[0, 1]
         u[1, 0] = q_in
 
         q_lumen = float(u[1, -1])  # x=L 处管腔流量
@@ -661,7 +661,7 @@ class NavierStokes1D:
             cols=2,
             subplot_titles=(
                 "A(t, x) [cm²]",
-                "沿程流量（时间平均）",
+                "流量FFR（时间平均）",
                 "x = 近端(blue) / 远端(red)",
                 f"t = {t_end:.3f} s",
             ),
@@ -683,17 +683,18 @@ class NavierStokes1D:
             col=1,
         )
 
-        q_hist = self.history_flow
-        q_slice = q_hist[3000:, :] if q_hist.shape[0] > 3000 else q_hist
-        q_mean = np.mean(q_slice, axis=0)
+        p_hist = self.history_pressure
+        p_slice = p_hist[200:, :] if p_hist.shape[0] > 200 else p_hist
+        p_mean = np.mean(p_slice, axis=0)
+        ffr_by_p = np.clip(p_mean / p_mean[0], 0.0, 1.0)
         fig.add_trace(
             go.Scatter(
                 x=xx,
-                y=q_mean,
+                y=ffr_by_p,
                 mode="lines",
-                name="Q",
+                name="FFR",
                 line=dict(color="green", width=2),
-                hovertemplate="x=%{x:.3f} cm<br>Q=%{y:.4f} cm³/s<extra></extra>",
+                hovertemplate="x=%{x:.3f} cm<br>FFR=%{y:.4f}<extra></extra>",
             ),
             row=1,
             col=2,
@@ -755,7 +756,7 @@ class NavierStokes1D:
         fig.update_xaxes(title_text="t (s)", row=1, col=1)
         fig.update_yaxes(title_text="x (cm)", row=1, col=1)
         fig.update_xaxes(title_text="x (cm)", row=1, col=2)
-        fig.update_yaxes(title_text="Q (cm³/s)", row=1, col=2)
+        fig.update_yaxes(title_text="FFR", row=1, col=2)
         fig.update_xaxes(title_text="t (s)", row=2, col=1)
         fig.update_yaxes(title_text="Q (cm³/s)", row=2, col=1)
         fig.update_xaxes(title_text="x (cm)", row=2, col=2)
@@ -779,22 +780,24 @@ class NavierStokes1D:
         return fig
 
 
-def _demo():
+def demo():
     from scipy.ndimage import gaussian_filter1d
-    np.random.seed(569)
+    np.random.seed(2034)
     sigma_nodes = 8   # 按网格点，2–5 试起
-    pullback_speed = 35  # mm/s
+    pullback_speed = 20  # mm/s
     frames_per_s = 200 # fps
-    pullback_time = 2.5  # s
+    pullback_time = 2.7  # s
     nx = 400
     # nx = int(pullback_time * frames_per_s)
     length = pullback_speed * pullback_time / 10  # cm
     
-    duration_s = 5  # s
-    area_file = np.load('area.npy')
-    area = area_file[::-1] / 100 / 20   # 冠脉管腔横截面积约为 1.8 -9 mm² (小于3可能就算狭窄了)
+    
+    duration_s = 3  # s
+    area_file = np.load('data/pred_masks20260721/area.npy')
+    area = area_file[::-1] / 100 # / 20   # 冠脉管腔横截面积约为 1.8 -9 mm² (小于3可能就算狭窄了)
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area.shape[0]
+    length = 0.3 * area.shape[0] / 10 
     area = np.full((nx, ), 0.07) # + np.random.random((nx, )) * 0.01
     print(nx, length)
 
@@ -810,14 +813,15 @@ def _demo():
 
     q_in  = np.mean(solver.history_flow[:, 0])
     q_out = np.mean(solver.history_flow[:, -1])
-    print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, diff={q_in-q_out:.3f}")
+    diff = np.mean(solver.history_flow[:, 0] - solver.history_flow[:, -1])
+    print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, diff={diff:.3f}")
     # 若 diff 长期显著 > 0，压力下降很可能是质量失衡
 
-    q_mean = np.nanmean(solver.history_flow[1000:, :], axis=0)
-    ffr = q_mean / parameters.mean_coronary_flow_ml_s()
+    p_mean = np.nanmean(solver.history_pressure[200:, :], axis=0)
+    ffr = p_mean / p_mean[0]
     ffr = np.clip(ffr, 0, 1)
     return ffr
 
 if __name__ == "__main__":
-    ffr = _demo()
+    ffr = demo()
     print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")
