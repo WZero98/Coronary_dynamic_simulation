@@ -36,7 +36,7 @@
 | 时间离散 | SSP-RK2 |
 | 入口 | `coronary_inlet.coronary_inlet_flow` |
 | 出口 | 与 `coronary_outlet` 一致的 Windkessel ODE（在线耦合） |
-| 主输入 | 沿程参考管腔面积 \(A_0(x)\) + `BloodFlowParameters` |
+| 主输入 | 与网格等长的 \(A_0\) + `BloodFlowParameters`（构造时自动检测狭窄） |
 
 > 本模块**不依赖** `demo/navier_stokes.py`；`demo/` 目录下为早期原型，接口与边界实现不同，请勿混用。
 
@@ -51,6 +51,7 @@
 | `matplotlib` | `plot_results()` 绘图（可选） |
 | `coronary_inlet.py` | 入口脉动流量 |
 | `coronary_outlet.py` | Windkessel 参数约定与离线参考压力 |
+| `geometry.py` | 近/远端参考选取与狭窄检测 |
 | `coronary_constants.py` | 共享公开全局常量（`P_INLET_REF_MMHG`、`MMHG_TO_DYNE_PER_CM2` 等） |
 
 安装示例：
@@ -134,7 +135,7 @@ c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
 | 截面积 \(A\) | cm² |
 | 体积流量 \(Q\) | cm³/s |
 | 入口模块输出 | mL/s（**1 mL = 1 cm³**，数值与 cm³/s 一致） |
-| 密度 \(\rho\) | g/cm³（默认 1.05） |
+| 密度 \(\rho\) | g/cm³（默认 1.06） |
 | 粘度 \(\mu\) | cm²/s |
 | 压力 \(p\)（`pressure`、`history_pressure`） | mmHg；沿 \(x\) 各点的**管腔标量压**，非方向分量 |
 | 时间 \(t\) | s |
@@ -185,8 +186,8 @@ U^{n+1} &= \mathrm{BC}\left(\tfrac{1}{2}U^n + \tfrac{1}{2}\bigl(U^{(1)} + \Delta
 | \(u(x)\) | **轴向流体速度**，\(u = Q/A\) | cm/s | `state[1] / state[0]` |
 | \(c(x)\) | **小扰动弹性波速**（管壁顺应性引起的压力–面积波沿 \(x\) 传播的速度） | cm/s | `_wave_speed` |
 | \(\lambda_{\max}\) | 全网格上特征速度上界 \(\|u\|+c\) 的最大值 | cm/s | `np.max(np.abs(u) + c)` |
-| \(\mathrm{CFL}\) | 稳定性安全系数，\(0<\mathrm{CFL}\lesssim 1\) | — | `BloodFlowParameters.cfl`（默认 0.5） |
-| \(\Delta t_{\max}\) | 时间步**硬上限**（避免单步过大、便于与 Windkessel 耦合） | s | `BloodFlowParameters.dt_max_s`（默认 \(5\times10^{-4}\)） |
+| \(\mathrm{CFL}\) | 稳定性安全系数，\(0<\mathrm{CFL}\lesssim 1\) | — | `BloodFlowParameters.cfl`（默认 0.8） |
+| \(\Delta t_{\max}\) | 时间步**硬上限**（避免单步过大、便于与 Windkessel 耦合） | s | `BloodFlowParameters.dt_max_s`（默认 \(4\times10^{-4}\)） |
 
 #### \(u\)：对流速度
 
@@ -466,35 +467,36 @@ sequenceDiagram
 
 **一句话**：入口为**定流量泵** \(Q_{\mathrm{in}}(t)\)；出口为 **Windkessel 定压（经 tube law 转为 \(A(L)\)）**，管腔流量 \(Q(L)\) 由 PDE 与入口经沿程传播耦合；微循环侧出流 \(Q_{\mathrm{venous}}=P_{\mathrm{wk}}/R_d\) 仅出现在 0D ODE 中。
 
-### 5.5 初值与模块耦合
+### 5.5 初值与构造时初始化
 
-`set_lumen_area_profile` 在设置 \(A_0(x)\) 后**同步初始化** PDE 状态与出口 Windkessel，使各模块在 \(t=0\) 自洽：
+`NavierStokes1D(...)` 构造时一次性完成几何处理、PDE 初值与出口 Windkessel 重置（**已无** `set_lumen_area_profile`）：
 
 | 量 | 初值 | 依据 |
 |----|------|------|
-| \(A(x,0)\) | \(A_0(x)\) | tube law → \(p \approx P_{\mathrm{ref}}\) |
+| \(A(x,0)\) | \(A_0(x)\)（经近/远端参考段平整后） | tube law → \(p \approx P_{\mathrm{ref}}\) |
 | \(Q(x,0)\) | \(Q_{\mathrm{in}}(0)\) | 与入口定流量 BC 一致（**非** \(Q_{\mathrm{mean}}\)） |
-| \(P_{\mathrm{wk}}(0)\) | \(Q_{\mathrm{mean}}\, R_d = P_{\mathrm{ref}}\) | Windkessel 稳态标定 |
+| \(P_{\mathrm{wk}}(0)\) | \(Q_{\mathrm{mean}}\, R_d\) | Windkessel 稳态标定 |
 | \(P_{\mathrm{lumen}}(0)\)（3wk） | \(P_{\mathrm{wk}} + R_p\, Q_{\mathrm{in}}(0)\) | `outlet.reset(q_drive=…)` |
+| \(P_{\mathrm{ref}}\)（3wk） | 构造末写为 \(P_{\mathrm{wk}}+R_p Q_{\mathrm{mean}}\) | 与出口管腔压锚点对齐；2wk 不改写 |
 
-**参数标定链**（默认自动，勿拆开改）：
+**参数标定链**：
 
 ```text
 CO, coronary_fraction  →  Q_mean
-P_ref (tube law)       →  R_d = P_ref / Q_mean
-outlet_proximal_fraction  →  R_p = fraction · R_d
+R_d：显式 outlet_r_distal…，或 None 时 R_d = P_ref / Q_mean
+outlet_proximal_fraction  →  R_p = fraction · R_d（若未显式给 Rp）
 ```
 
-稳态对齐关系：当 \(A=A_0\)、\(Q=Q_{\mathrm{mean}}\) 时，tube law 给出 \(p=P_{\mathrm{ref}}\)，Windkessel 给出 \(P_{\mathrm{wk}}=P_{\mathrm{ref}}\)。
+默认 `outlet_r_distal_mmhg_s_per_ml=20` 时，\(P_{\mathrm{wk}}(0)=Q_{\mathrm{mean}}\cdot 20\)，**不必**等于初始 `p_ref_mmhg`；三元模型随后会把 `p_ref_mmhg` 抬到与出口稳态管腔压一致。
 
-**`_OutletWindkesselState.reset(p_wk=None, q_drive=None)`**
+**`OutletWindkesselState.reset(p_wk=None, q_drive=None)`**
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `p_wk` | `Q_mean · R_d` | 顺应性节点压 |
-| `q_drive` | `Q_in(0)` | 三元模型计算 \(P_{\mathrm{lumen}}=P_{\mathrm{wk}}+R_p Q_{\mathrm{drive}}\) |
+| `q_drive` | `Q_in(0)` | 三元模型 \(P_{\mathrm{lumen}}=P_{\mathrm{wk}}+R_p Q_{\mathrm{drive}}\) |
 
-建议 `duration_s` 取 ≥2–3 个心动周期再统计；若需进一步减小启动瞬态，可离线预积分 Windkessel 取周期末 \(P_{\mathrm{wk}}\) 传入 `reset(p_wk=…)`（见 §11）。
+建议 `duration_s` 取 ≥2–3 个心动周期再统计。
 
 ---
 
@@ -506,7 +508,7 @@ outlet_proximal_fraction  →  R_p = fraction · R_d
 python navier_stokes_1d.py
 ```
 
-示例：30 cm 血管、渐细管腔、11–17 cm 狭窄段、模拟 2 s。
+调用 `demo()`：从 `data/pred_masks…/area.npy` 读入面积、高斯平滑后构造求解器，默认模拟约 3 s，并用 `plot_results_1()`（Plotly）展示。
 
 ### 6.2 最小脚本
 
@@ -515,77 +517,83 @@ import numpy as np
 from navier_stokes_1d import NavierStokes1D, BloodFlowParameters
 
 L, nx = 30.0, 151
-x = np.linspace(0.0, L, 80)
+x = np.linspace(0.0, L, nx)
+# area 须与 nx 等长，单位 cm²（已在求解网格上，构造时不再插值）
 area = np.pi * (0.40 - 0.08 * x / L) ** 2
 
 par = BloodFlowParameters(
     heart_rate_bpm=75.0,
     coronary_flow_fraction=0.03,
-    outlet_windkessel="2wk",
-    cfl=0.45,
+    outlet_windkessel="3wk",
+    cfl=0.8,
 )
 
-solver = NavierStokes1D(L, nx, par)
-solver.set_lumen_area_profile(area, x=x)
-
+solver = NavierStokes1D(area, L, nx, par)
 A_hist, Q_hist, p_hist, t_hist = solver.run(duration_s=2.4, record_interval_steps=25)
 print("FFR ≈", solver.ffr_ratio())
-solver.plot_results()
+solver.plot_results()          # matplotlib
+# solver.plot_results_1()      # Plotly 交互图
 ```
 
 ### 6.3 推荐工作流
 
 ```text
-BloodFlowParameters → NavierStokes1D → set_lumen_area_profile → run → 后处理 / plot_results
+准备 A₀(nx) → BloodFlowParameters → NavierStokes1D(area, L, nx, par) → run → 后处理 / plot_results[_1]
 ```
 
 ---
 
 ## 7. 输入数据：管腔面积剖面
 
-### 7.1 `set_lumen_area_profile`
+### 7.1 在构造函数中传入 \(A_0\)
+
+参考面积在构造时直接给出（**不再**提供 `set_lumen_area_profile`）：
 
 ```python
-solver.set_lumen_area_profile(
-    area,           # 参考截面积 A₀，单位 cm²
-    x=None,         # 采样位置 (cm)；None 则在 [0,L] 上均匀布点
-    beta=None,      # β(x)，标量或数组；None 则用参数类默认值
-    lesions=None,   # 可选狭窄 [(x0, x1, area_scale, beta_scale), ...]
+NavierStokes1D(
+    area,                 # A₀，shape (n_nodes,)，单位 cm²
+    vessel_length_cm,     # L (cm)
+    n_nodes,              # 与 area 长度一致
+    parameters=None,
 )
 ```
 
-| 参数 | 说明 |
+| 要求 | 说明 |
 |------|------|
-| `area` | 至少 2 个点；定义 \(A_0(x)\) |
-| `x` | 与 `area` 等长；若未覆盖 0 或 L，自动在端点补常值外推 |
-| `beta` | 标量 → 全场常数；数组 → 插值到求解网格 |
-| `lesions` | 在插值后的 \(A_0,\beta\) 上，对 \([x_0,x_1]\) 闭区间乘以 `area_scale`、`beta_scale` |
+| `area` | 一维数组，长度必须为 `n_nodes`；点 \(i\) 对应 \(x_i=i\cdot L/(n_x-1)\) |
+| 单位 | cm²（若原始数据为 mm²，需自行换算，如 `/100`） |
+| 插值 | **无**：请先在外部插值/平滑到求解网格 |
 
-调用后会：
+构造内还会：
 
-- 将 `state[0] = A₀(x)`，`state[1] = Q_in(0)`（与入口 BC 一致，非静止初值）
-- 由 tube law 更新 `pressure`（\(A=A_0\) 时 \(p \approx P_{\mathrm{ref}}\)）
-- 调用 `outlet.reset(p_wk=Q_mean·R_d, q_drive=Q_in(0))` 重置 Windkessel；三元模型含 \(R_p Q_{\mathrm{in}}(0)\) 项
+1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_sqrt_cm`
+2. `geometry.select_reference_indices` → 近/远端参考下标 `prox_idx`, `dist_idx`
+3. `geometry.detect_stenoses` → 自动检测狭窄段 `lesions`
+4. 狭窄段：\(\beta \mathrel{*}= A_0(\mathrm{prox})/A_0(\mathrm{MLA})\)
+5. 近端段 \(x\le x_{\mathrm{prox}}\)、远端段 \(x\ge x_{\mathrm{dist}}\) 的 \(A_0\) 分别平整为参考点面积
+6. `outlet.reset(...)`；若 `3wk` 则更新 `p_ref_mmhg` 与出口稳态管腔压对齐
+7. \(A=A_0\)，\(Q=Q_{\mathrm{in}}(0)\)，刷新 `pressure`
 
 ### 7.2 由半径构造面积
 
 ```python
-radius_cm = ...  # 沿程半径
+radius_cm = ...  # 沿程半径，长度 = n_nodes
 area = np.pi * radius_cm**2
-solver.set_lumen_area_profile(area, x=x_cm)
+solver = NavierStokes1D(area, L, nx, par)
 ```
 
-### 7.3 狭窄示例
+### 7.3 自动狭窄检测（`geometry.py`）
 
-```python
-# 在 12–18 cm 处：参考面积 ×0.65，管壁刚度 ×4.5
-lesions=[(12.0, 18.0, 0.65, 4.5)]
-```
+| 步骤 | 函数 / 行为 |
+|------|-------------|
+| 近/远端参考 | `select_reference_indices`：前/后约 15% 区段内取面积最大（远端面积 ≤ 近端） |
+| 狭窄段 | `detect_stenoses`：近远端之间找 MLA，段宽约 \(\pm 5\%\,n_x\)，最多 3 段 |
+| \(\beta\) 放大 | 狭窄 mask 上 \(\beta \leftarrow \beta\cdot A_{0,\mathrm{prox}}/A_{0,\mathrm{MLA}}\) |
 
-面积狭窄率（相对健康段 \(A_{0,\mathrm{ref}}\)）：
+面积狭窄率（相对近端参考）：
 
 \[
-\text{stenosis\%} \approx \left(1 - \frac{A_{0,\min}}{A_{0,\mathrm{ref}}}\right)\times 100\%
+\text{stenosis\%} \approx \left(1 - \frac{A_{0,\mathrm{MLA}}}{A_{0,\mathrm{prox}}}\right)\times 100\%
 \]
 
 ### 7.4 参数数量级参考
@@ -593,7 +601,7 @@ lesions=[(12.0, 18.0, 0.65, 4.5)]
 | 参数 | 典型量级 |
 |------|----------|
 | \(A_0\) | 0.05–1.0 cm² |
-| \(\beta\) | 500–1500 mmHg/√cm |
+| \(\beta\) | 500–1500 mmHg/√cm（默认 500） |
 | \(L\) | 10–50 cm |
 | \(Q_{\mathrm{mean}}\) | 约 2.5–4 mL/s（由 CO 与冠脉比例决定） |
 
@@ -607,27 +615,27 @@ lesions=[(12.0, 18.0, 0.65, 4.5)]
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `rho` | 1.05 | 密度 (g/cm³) |
+| `rho` | 1.06 | 密度 (g/cm³) |
 | `alpha` | 1.1 | 动量修正系数 |
 | `mu` | 0.0035 | 运动粘度 (cm²/s) |
-| `cfl` | 0.5 | CFL 数 |
-| `dt_max_s` | 5e-4 | 时间步上限 (s) |
+| `cfl` | 0.8 | CFL 数 |
+| `dt_max_s` | 4e-4 | 时间步上限 (s) |
 
 ### 8.2 管壁
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `p_ref_mmhg` | 80 | tube law 参考压 (mmHg) |
-| `beta_mmhg_per_sqrt_cm` | 750 | 默认 \(\beta\) |
+| `p_ref_mmhg` | 80 | tube law 参考压 (mmHg)；`3wk` 构造末可能被抬到出口稳态管腔压 |
+| `beta_mmhg_per_sqrt_cm` | 500 | 默认 \(\beta\) |
 
 ### 8.3 入口（→ `coronary_inlet_flow`）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `heart_rate_bpm` | 75 | 心率 |
-| `cardiac_output_l_per_min` | 5.0 | 心输出量 (L/min) |
+| `cardiac_output_l_per_min` | 5.5 | 心输出量 (L/min) |
 | `coronary_flow_fraction` | 0.03 | 冠脉占 CO 比例 |
-| `inlet_min_flow_fraction` | 0.1 | 流量下限 = 该比例 × \(Q_{\mathrm{mean}}\) |
+| `inlet_min_flow_fraction` | 0.25 | 流量下限 = 该比例 × \(Q_{\mathrm{mean}}\) |
 | `inlet_phase_offset_rad` | 0 | 波形相位偏移 |
 | `inlet_fourier_coefficients` | None | 自定义谐波；None 用模块内置默认系数 |
 
@@ -636,15 +644,16 @@ lesions=[(12.0, 18.0, 0.65, 4.5)]
 - `mean_coronary_flow_ml_s()` → \(Q_{\mathrm{mean}}\)
 - `inlet_flow(t)` → 入口流量数组
 - `resolve_outlet_resistances()` → \((R_d, R_p)\)
+- `momentum_rho()` → 与 mmHg 压配对的有效密度 \(\rho^*\)
 
 ### 8.4 出口 Windkessel
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `outlet_windkessel` | `"2wk"` | `"2wk"` 或 `"3wk"` |
-| `outlet_r_distal_mmhg_s_per_ml` | None | \(R_d\)；None 则 \(P_{\mathrm{ref}}/Q_{\mathrm{mean}}\) |
-| `outlet_r_proximal_mmhg_s_per_ml` | None | \(R_p\)；None 则 `0.12 * R_d` |
-| `outlet_compliance_ml_per_mmhg` | 0.08 | 顺应性 \(C\) |
+| `outlet_windkessel` | `"3wk"` | `"2wk"` 或 `"3wk"` |
+| `outlet_r_distal_mmhg_s_per_ml` | 20 | \(R_d\)；`None` 则 \(P_{\mathrm{ref}}/Q_{\mathrm{mean}}\) |
+| `outlet_r_proximal_mmhg_s_per_ml` | None | \(R_p\)；None 则 `proximal_fraction * R_d` |
+| `outlet_compliance_ml_per_mmhg` | 0.05 | 顺应性 \(C\) |
 | `outlet_proximal_fraction` | 0.12 | 三元模型近端阻力比例 |
 
 Windkessel ODE 驱动流量固定为出口管腔流量 \(Q(L)\)，无额外配置项。
@@ -657,6 +666,7 @@ Windkessel ODE 驱动流量固定为出口管腔流量 \(Q(L)\)，无额外配�
 
 ```python
 NavierStokes1D(
+    area: np.ndarray | list,          # A₀，长度 = n_nodes，单位 cm²
     vessel_length_cm: float,
     n_nodes: int,
     parameters: BloodFlowParameters | None = None,
@@ -667,9 +677,12 @@ NavierStokes1D(
 |------|------|
 | `length`, `nx`, `dx` | 长度、节点数、间距 |
 | `x` | 节点坐标 (cm)，shape `(nx,)` |
-| `area_ref`, `beta` | 参考几何，shape `(nx,)` |
+| `area_ref`, `beta` | 参考几何与刚度，shape `(nx,)` |
+| `prox_idx`, `dist_idx` | 近/远端参考下标 |
+| `lesions` | `geometry.detect_stenoses` 结果列表 |
 | `state` | 守恒变量 `[A, Q]`，shape `(2, nx)` |
 | `pressure` | 沿程管腔标量压 \(p(x)\) (mmHg)，shape `(nx,)`；由 tube law 从 \(A\) 派生 |
+| `outlet` | `OutletWindkesselState` 实例 |
 | `time` | 当前物理时间 (s) |
 
 ### 9.2 `run(duration_s, record_interval_steps=20)`
@@ -685,9 +698,12 @@ NavierStokes1D(
 
 同时写入对象属性 `solver.history_*`。保存帧数约为 `1 + floor(n_steps / record_interval_steps)`。
 
-### 9.3 `plot_results()`
+### 9.3 绘图
 
-2×2 子图：\(A(t,x)\) 云图、\(\langle p(x)\rangle_t\)、入口 \(Q,p\) 曲线、末时刻沿程 \(A,p,Q\)。需先 `run()`。
+| 方法 | 说明 |
+|------|------|
+| `plot_results()` | matplotlib 2×2：\(A(t,x)\)、沿程平均 \(Q\)、指定点 \(p(t)\)、末时刻 \(A\)/\(p\) |
+| `plot_results_1(show=True, renderer=None)` | Plotly 交互版同类四图；`demo()` 默认调用此接口 |
 
 ### 9.4 模块级工具函数
 
@@ -747,25 +763,26 @@ np.savez(
 
 ## 11. 与离线 Windkessel 对比
 
-`NavierStokes1D.reference_outlet_pressure(times, parameters, q_override=None)` 调用 `coronary_outlet` 的 `windkessel2_outlet_pressure` / `windkessel3_outlet_pressure`，在**给定流量序列**下离线积分得到参考 \(P_{\mathrm{out}}(t)\)，**不参与**耦合求解。
-
-离线模型以 **`Q_in(t)`** 驱动 Windkessel（无 1D 管腔、无沿程延迟）；耦合求解以 **`Q(L)`** 驱动。二者驱动方式不同，耦合结果含沿程传播，与离线曲线会有相位/幅值差异，属预期行为。
+求解器**不再**提供 `NavierStokes1D.reference_outlet_pressure`。若需离线参考曲线，直接调用 `coronary_outlet`：
 
 ```python
+from coronary_outlet import coronary_outlet_pressure
+
 t = np.linspace(0, 2.0, 2000)
-p_ref = NavierStokes1D.reference_outlet_pressure(t, par)
-# 三元模型返回 (p_out, p_wk)
+# 默认用 coronary_inlet_flow 作驱动；也可传入 q_in=
+p_out = coronary_outlet_pressure(t, model="3wk", ...)
+# 或与 solver.history_pressure[:, -1] 对比相位/幅值
 ```
 
-用途：检查 Windkessel 参数；与 `solver.history_pressure[:, -1]` 对比。耦合良好时相关系数通常 \> 0.99。
+离线以入口（或给定）\(Q(t)\) 驱动；耦合求解以 **`Q(L)`** 驱动，含沿程传播延迟，曲线不必逐点重合。
 
-**质量守恒诊断**（`_demo` 中已有）：
+**质量守恒诊断**（`demo()` 中有类似输出）：
 
 ```python
 q_in  = np.mean(solver.history_flow[:, 0])
 q_out = np.mean(solver.history_flow[:, -1])
 print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
-# 修复后 |Q(L)−Q[-2]| 应很小；勿将 Q(L) 与 outlet.p_wk/outlet.r_d 逐点对比
+# 勿将 Q(L) 与 outlet.p_wk/outlet.r_d 逐点对比
 ```
 
 ---
@@ -774,13 +791,13 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
 
 | 目标 | 建议 |
 |------|------|
-| 更高空间精度 | 增大 `n_nodes`；略减小 `cfl`（如 0.35–0.45） |
+| 更高空间精度 | 增大 `n_nodes`（并同步加长 `area`）；略减小 `cfl` |
 | 加快计算 | 减小 `n_nodes` 或 `duration_s`；增大 `record_interval_steps` |
 | 不稳定 / 振荡 | 减小 `cfl`；检查 \(\beta\) 是否过大；确认单位一致 |
-| 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s）；初值已用 \(Q_{\mathrm{in}}(0)\) 与稳态 \(P_{\mathrm{wk}}\)，启动瞬态较旧版 \(Q=0\) 更短 |
-| 更重狭窄 | 适当增大狭窄段 `beta_scale`；必要时加密网格 |
+| 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s） |
+| 更重狭窄 | 几何 \(A_0\) 更窄；自动放大的狭窄段 \(\beta\) 已随 MLA 变小而增大；必要时加密网格 |
 
-计算量：每步 2 次空间算子（SSP-RK2），复杂度 \(O(n_x)\)。`nx=121`, `T=2` s 时通常为 \(10^4\) 量级步数，普通 PC 上数十秒量级。
+计算量：每步 2 次空间算子（SSP-RK2），复杂度 \(O(n_x)\)。
 
 ---
 
@@ -790,43 +807,44 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
 2. 出口为 **Windkessel–tube law 耦合**，非特征非反射边界；与纯 prescribed \(P(t)\) 或纯 \(Q\) 外推不同。
 3. 摩擦为线性 Poiseuille，未含湍流、弯曲损失等。
 4. **FFR** 为简化压比，非临床标准。
-5. 初值为 \(A=A_0,\; Q=Q_{\mathrm{in}}(0)\)，\(P_{\mathrm{wk}}=P_{\mathrm{ref}}\)；脉动工况下仍建议 ≥2 个心动周期再取统计量。
+5. 初值为 \(A=A_0,\; Q=Q_{\mathrm{in}}(0)\)；`3wk` 下 `p_ref` 会与出口稳态对齐；脉动工况建议 ≥2 个心动周期再取统计量。
+6. \(A_0\) 须已在求解网格上，构造函数**不做**空间插值。
 
-扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像中心线半径 CSV 转为 `set_lumen_area_profile` 输入；多支血管可在外层循环或多段拼接。
+扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像半径/面积在外部插值到 `n_nodes` 后传入构造；多支血管可在外层循环或多段拼接。
 
 ---
 
 ## 14. 常见问题
 
 **Q：`demo/navier_stokes.py` 与本模块有何区别？**  
-A：`demo/` 为旧原型（不同边界类与 import 路径）。新项目请只用根目录 `navier_stokes_1d.py` + `coronary_inlet/outlet`。
+A：`demo/` 为旧原型（不同边界类与 import 路径）。新项目请只用根目录 `navier_stokes_1d.py` + `coronary_inlet/outlet` + `geometry.py`。
 
 **Q：入口 mL/s 与求解器流量单位？**  
 A：1 mL = 1 cm³，数值可直接作为 cm³/s 使用。
 
 **Q：`run()` 后 `ffr_ratio()` 大于 1？**  
-A：可能尚未达到周期稳态，或指标定义与临床 FFR 不同；延长 `duration_s` 或自定义远端/近端分区。
+A：可能尚未达到周期稳态，或指标定义与临床 FFR 不同；延长 `duration_s` 或用 `prox_idx`/远端网格自定义压比（`demo()` 中有按近端参考归一的示例）。
 
 **Q：如何改入口波形？**  
-A：修改 `BloodFlowParameters` 中心输出量、冠脉比例、傅里叶系数等；细节见 `coronary_inlet_说明.md`。
+A：修改 `BloodFlowParameters` 中心输出量、冠脉比例、傅里叶系数等；细节见 [`coronary_inlet_说明.md`](coronary_inlet_说明.md)。
 
 **Q：如何改出口阻力/顺应性？**  
 A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等；与 `coronary_outlet` 中参数含义相同。
 
 **Q：无 GUI 如何出图？**  
-A：设置 `MPLBACKEND=Agg`，在 `plot_results()` 后增加 `fig.savefig("result.png")`（需自行获取 `fig` 引用或改写绘图函数）。
+A：matplotlib：`MPLBACKEND=Agg` 后自行 `savefig`；Plotly：`plot_results_1(show=False)` 再 `fig.write_html(...)`。
 
-**Q：`set_lumen_area_profile` 与 `lesions` 顺序？**  
-A：先插值 `area`/`beta` 到网格，再对 `lesions` 区间做乘法修正。
+**Q：如何设置管腔面积？还有 `set_lumen_area_profile` 吗？**  
+A：**已删除**。请准备与 `n_nodes` 等长的 `area`（cm²），传入 `NavierStokes1D(area, L, nx, par)`。狭窄由 `geometry.detect_stenoses` 自动检测并放大 \(\beta\)。
 
 **Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
-A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 仍用 \(Q_{\mathrm{mean}} R_d\) 稳态标定，与 tube law 的 \(P_{\mathrm{ref}}\) 对齐。
+A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 用 \(Q_{\mathrm{mean}} R_d\) 标定；`3wk` 时还会改写 `p_ref` 以对齐出口管腔压。
 
 **Q：`pressure` 是沿 x 轴方向的压力吗？**  
-A：否。\(p\) 是各向同性**标量**管腔压（mmHg），`pressure[i]` 只是位置 \(x_i\) 处的取值。tube law 将其与 \(A\) 耦合（径向胀缩）；动量方程中 \(\partial(pA)/\partial x\) 体现沿 \(x\) 的压力梯度对轴向流量 \(Q\) 的驱动。详见 [§3.2.1](#321-管腔压-p-的物理含义)。
+A：否。\(p\) 是各向同性**标量**管腔压（mmHg），`pressure[i]` 只是位置 \(x_i\) 处的取值。详见 [§3.2.1](#321-管腔压-p-的物理含义)。
 
 **Q：出口 `Q(L)` 为何不等于 `P_wk/R_d`？**  
-A：\(P_{\mathrm{wk}}/R_d\) 是 Windkessel **微循环侧出流** \(Q_{\mathrm{venous}}\)，不是管腔出口流量。耦合求解中 \(Q(L)\) 由 1D PDE 保留；仅当 \(dP_{\mathrm{wk}}/dt=0\) 时两者接近。详见 [§5.2](#52-出口xlwindkessel-耦合)。
+A：\(P_{\mathrm{wk}}/R_d\) 是 Windkessel **微循环侧出流** \(Q_{\mathrm{venous}}\)，不是管腔出口流量。耦合求解中 \(Q(L)\) 由 1D PDE 保留。详见 [§5.2](#52-出口xlwindkessel-耦合)。
 
 ---
 
@@ -835,14 +853,12 @@ A：\(P_{\mathrm{wk}}/R_d\) 是 Windkessel **微循环侧出流** \(Q_{\mathrm{v
 ```text
 FFR_1D/
 ├── navier_stokes_1d.py      # 本求解器 ★
-├── navier_stokes_1d.md      # 本文档
+├── docs/navier_stokes_1d.md # 本文档
+├── geometry.py              # 近远端参考与狭窄检测
 ├── coronary_constants.py    # 共享公开全局常量
 ├── coronary_inlet.py        # 入口 Q(t)
-├── coronary_inlet_说明.md
 ├── coronary_outlet.py       # Windkessel 出口模型与离线压力
-├── coronary_outlet.md
 └── demo/                    # 早期原型（勿与根目录求解器混用）
-    └── navier_stokes.py
 ```
 
 **数据流示意：**
@@ -850,8 +866,9 @@ FFR_1D/
 ```mermaid
 flowchart LR
   subgraph input [输入]
-    A0["A₀(x) 管腔面积"]
+    A0["A₀(x) 已在网格上"]
     PAR["BloodFlowParameters"]
+    GEO["geometry 参考/狭窄"]
   end
   subgraph solver [navier_stokes_1d]
     FV["FVM + MUSCL + HLL"]
@@ -861,7 +878,8 @@ flowchart LR
     IN["coronary_inlet_flow"]
     WK["Windkessel ODE"]
   end
-  A0 --> FV
+  A0 --> GEO
+  GEO --> FV
   PAR --> FV
   PAR --> IN
   PAR --> WK
@@ -873,4 +891,4 @@ flowchart LR
 
 ---
 
-*文档版本与 `navier_stokes_1d.py` 同步；若 API 变更，以源码 docstring 为准。*
+*文档版本与 `navier_stokes_1d.py` 同步；若 API 变更，以源码为准。*
