@@ -60,6 +60,7 @@ import numpy as np
 
 from coronary_constants import P_INLET_REF_MMHG, rho_for_mmhg_pressure_coupling
 from coronary_inlet import coronary_inlet_flow
+from geometry import detect_stenoses, select_reference_indices
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +216,7 @@ class BloodFlowParameters:
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 3000  # 默认β，越大表示管腔越硬（管壁刚度）
+    beta_mmhg_per_sqrt_cm: float = 2000.0  # 默认β，越大表示管腔越硬（管壁刚度）
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
@@ -391,6 +392,18 @@ class NavierStokes1D:
         self.history_pressure: np.ndarray | None = None
 
         self.area_ref = np.maximum(self.area_ref, 1e-8)
+
+        # 判断是否有狭窄
+        self.prox_idx, self.dist_idx = select_reference_indices(self.area_ref)
+        lesions = detect_stenoses(self.area_ref, self.prox_idx, self.dist_idx)
+        # pre_prox_mask = (self.x <= self.x[self.prox_idx])
+        # self.area_ref[pre_prox_mask] = self.area_ref[self.prox_idx]
+        if lesions:
+            print(f"Detect {len(lesions)} stenoses. ")
+            for lesion in lesions:
+                mask = (self.x >= self.x[lesion.i0]) & (self.x <= self.x[lesion.i1])
+                b_scale = self.area_ref[self.prox_idx] / self.area_ref[lesion.mla_idx]
+                self.beta[mask] *= b_scale
 
         # 初值：A=A₀；Q=Q_in(0)；P_wk=Q_mean·R_d（R_d 用 outlet 构造时的标定值，勿在抬高 p_ref 后再 resolve）
         q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
@@ -686,11 +699,11 @@ class NavierStokes1D:
         p_hist = self.history_pressure
         p_slice = p_hist[200:, :] if p_hist.shape[0] > 200 else p_hist
         p_mean = np.mean(p_slice, axis=0)
-        ffr_by_p = np.clip(p_mean / p_mean[0], 0.0, 1.0)
+        ffr = np.clip(p_mean / p_mean[0], 0.0, 1.0)
         fig.add_trace(
             go.Scatter(
                 x=xx,
-                y=ffr_by_p,
+                y=ffr,
                 mode="lines",
                 name="FFR",
                 line=dict(color="green", width=2),
@@ -783,7 +796,7 @@ class NavierStokes1D:
 def demo():
     from scipy.ndimage import gaussian_filter1d
     np.random.seed(2034)
-    sigma_nodes = 8   # 按网格点，2–5 试起
+    sigma_nodes = 4   # 按网格点，2–5 试起
     pullback_speed = 20  # mm/s
     frames_per_s = 200 # fps
     pullback_time = 2.7  # s
