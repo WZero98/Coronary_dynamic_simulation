@@ -58,7 +58,7 @@ from typing import Literal, Sequence
 
 import numpy as np
 
-from coronary_constants import P_INLET_REF_MMHG, rho_for_mmhg_pressure_coupling
+from coronary_constants import MINIMUM_AREA_RATIO, P_INLET_REF_MMHG, rho_for_mmhg_pressure_coupling
 from coronary_inlet import coronary_inlet_flow
 from geometry import detect_stenoses, select_reference_indices
 
@@ -78,7 +78,7 @@ def lumen_pressure_mmhg(
     用于 tube law 径向胀缩关系及动量方程中的 ∂(pA)/∂x 项。
     """
     a0 = np.asarray(area_ref, dtype=float)
-    a = np.maximum(np.asarray(area, dtype=float), 0.5 * a0)
+    a = np.maximum(np.asarray(area, dtype=float), MINIMUM_AREA_RATIO * a0)
     b = np.asarray(beta, dtype=float)
     return (p_ref + b * (np.sqrt(a) - np.sqrt(a0)))
 
@@ -94,7 +94,7 @@ def area_from_lumen_pressure_mmhg(
     b = np.asarray(beta, dtype=float)
     p = np.asarray(pressure, dtype=float)
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
-    return np.maximum(sqrt_a**2, 0.5 * a0)
+    return np.maximum(sqrt_a**2, MINIMUM_AREA_RATIO * a0)
     
 # ---------------------------------------------------------------------------
 # TVD / MUSCL / HLL
@@ -121,7 +121,7 @@ def _muscl_states(
     u_left = U[:, :-1] + 0.5 * slope[:, :-1]
     # 右状态计算，来自下一个单元
     u_right = U[:, 1:] - 0.5 * slope[:, 1:]
-    floor = 0.5 * area_ref
+    floor = MINIMUM_AREA_RATIO * area_ref
     u_left[0] = np.maximum(u_left[0], floor[:-1])
     u_right[0] = np.maximum(u_right[0], floor[1:])
     return u_left, u_right
@@ -228,7 +228,7 @@ class BloodFlowParameters:
 
     # 出口 Windkesse模型 相关
     outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
-    outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
+    outlet_r_distal_mmhg_s_per_ml: float | None = 20  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
     outlet_proximal_fraction: float = 0.12  # 三元模型近端阻力比例
@@ -291,7 +291,7 @@ class OutletWindkesselState:
         self.r_d, self.r_p = params.resolve_outlet_resistances()
         self.c = max(params.outlet_compliance_ml_per_mmhg, 1e-9)
         q_mean = params.mean_coronary_flow_ml_s()
-        self.p_wk = q_mean * self.r_d  # p_wk初始值
+        self.p_wk = q_mean * self.r_d
         self.p_lumen = self.p_wk + (
             self.r_p * q_mean if self.is_three_element else 0.0
         )
@@ -301,7 +301,7 @@ class OutletWindkesselState:
         p_wk: float | None = None,
         q_drive: float | None = None,
     ) -> None:
-        """重置出口 Windkessel；P_wk 默认稳态标定，三元模型 P_lumen 用 q_drive。"""
+        """重置出口 Windkessel；P_wk 默认 Q_mean·R_d，三元模型 P_lumen 用 q_drive。"""
         q_mean = self.params.mean_coronary_flow_ml_s()
         if q_drive is None:
             q_drive = float(
@@ -316,7 +316,7 @@ class OutletWindkesselState:
 
     def lumen_pressure(self, q_drive: float) -> float:
         if self.is_three_element:
-            return self.p_wk + self.r_p * q_drive
+            return self.p_wk + self.r_p * float(q_drive)
         return self.p_wk
 
     def outlet_flow_from_state(self) -> float:
@@ -395,12 +395,12 @@ class NavierStokes1D:
 
         # 判断是否有狭窄
         self.prox_idx, self.dist_idx = select_reference_indices(self.area_ref)
-        lesions = detect_stenoses(self.area_ref, self.prox_idx, self.dist_idx)
+        self.lesions = detect_stenoses(self.area_ref, self.prox_idx, self.dist_idx)
         # pre_prox_mask = (self.x <= self.x[self.prox_idx])
         # self.area_ref[pre_prox_mask] = self.area_ref[self.prox_idx]
-        if lesions:
-            print(f"Detect {len(lesions)} stenoses. ")
-            for lesion in lesions:
+        if self.lesions:
+            print(f"Detect {len(self.lesions)} stenoses. ")
+            for lesion in self.lesions:
                 mask = (self.x >= self.x[lesion.i0]) & (self.x <= self.x[lesion.i1])
                 b_scale = self.area_ref[self.prox_idx] / self.area_ref[lesion.mla_idx]
                 self.beta[mask] *= b_scale
@@ -479,7 +479,7 @@ class NavierStokes1D:
         u = state.copy()  #[A, Q]
         q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
 
-        # u[0, 0] = u[0, 1]
+        # 入口：定流量 Q_in(t)；A(0) 由 PDE/相邻单元演化（压初值仅在初始化锚定 P_ref）
         u[1, 0] = q_in
 
         q_lumen = float(u[1, -1])  # x=L 处管腔流量
@@ -500,7 +500,7 @@ class NavierStokes1D:
     @staticmethod
     def _clip_state(state: np.ndarray, area_ref: np.ndarray) -> np.ndarray:
         u = state.copy()
-        u[0] = np.maximum(u[0], 0.5 * area_ref)
+        u[0] = np.maximum(u[0], MINIMUM_AREA_RATIO * area_ref)
         # u[1] = np.maximum(u[1], 0.0)
         return u
 
@@ -831,7 +831,7 @@ def demo():
     # 若 diff 长期显著 > 0，压力下降很可能是质量失衡
 
     p_mean = np.nanmean(solver.history_pressure[200:, :], axis=0)
-    ffr = p_mean / p_mean[0]
+    ffr = p_mean / p_mean[solver.prox_idx]
     ffr = np.clip(ffr, 0, 1)
     return ffr
 
