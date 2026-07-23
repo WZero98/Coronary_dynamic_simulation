@@ -72,7 +72,19 @@ python navier_stokes_1d.py
 
 ## 3. 物理模型与单位
 
-### 3.1 守恒方程
+### 3.1 控制方程（当前正确形式）
+
+文献中一维可变形管血流的标准出发点为（Formaggia / Sherwin / Ghigo–Delestre–Lagrée 等）：
+
+\[
+\partial_t A + \partial_x Q = 0,
+\qquad
+\partial_t Q + \partial_x\!\left(\alpha\frac{Q^2}{A}\right)
++ \frac{A}{\rho^*}\partial_x p
+= -\frac{8\pi\mu Q}{A}.
+\]
+
+写成有限体积所用的通量–源项形式：
 
 \[
 \frac{\partial U}{\partial t} + \frac{\partial F}{\partial x} = S,
@@ -81,21 +93,55 @@ U = \begin{bmatrix} A \\ Q \end{bmatrix}
 \]
 
 \[
-F = \begin{bmatrix} Q \\ \dfrac{\alpha Q^2}{A} + \dfrac{A}{\rho}p(A) \end{bmatrix},
+F = \begin{bmatrix} Q \\ \alpha Q^2/A \end{bmatrix},
 \quad
-S = \begin{bmatrix} 0 \\ -\dfrac{8\pi\mu Q}{A} \end{bmatrix}
+S = \begin{bmatrix}
+  0 \\[4pt]
+  -\dfrac{A}{\rho^*}\partial_x p \;-\; \dfrac{8\pi\mu Q}{A}
+\end{bmatrix}
 \]
 
 | 符号 | 含义 |
 |------|------|
 | \(A\) | 血管截面积 |
 | \(Q\) | 体积流量（沿 \(x\) 正向为出口方向） |
-| \(\rho\) | 血液密度 |
+| \(\rho^*\) | 与 mmHg 制管腔压配对的动量有效密度（`momentum_rho()`） |
 | \(\alpha\) | 动量修正系数（层流常取 1.1） |
 | \(\mu\) | 运动粘度 |
+| 压力驱动 | **源项** \(-(A/\rho^*)\partial_x p\)，\(p\) 由 tube law 在单元中心计算 |
 | 摩擦项 | Poiseuille 型 \(-8\pi\mu Q/A\) |
 
-通量中的 \(p(A)\) 在计算动量项时由 **mmHg 换算为 cgs（dyne/cm²）**，系数见 `coronary_constants.MMHG_TO_DYNE_PER_CM2`（1333.22）。
+实现上：HLL/物理通量只处理对流部分 \(F\)；\(\partial_x p\) 在单元中心用中心差分（端点用单侧差分）离散。当 \(A\equiv A_0\) 时 \(p\equiv P_{\mathrm{ref}}\)，故 \(\partial_x p=0\)，静止平衡无虚假轴向力。
+
+侧支开口处连续方程另含质量汇 \(-Q_b/\Delta x\)（见边界条件节）。
+
+#### 3.1.1 既往通量错误（已修正）
+
+**错误写法**（旧版代码与旧文档）：把管腔压放进动量通量，且**不**补几何等价源项：
+
+\[
+F_1^{\mathrm{(wrong)}} = \alpha\frac{Q^2}{A} + \frac{p\,A}{\rho^*},
+\qquad
+S_Q^{\mathrm{(wrong)}} = -\frac{8\pi\mu Q}{A}.
+\]
+
+由乘积法则：
+
+\[
+\frac{A}{\rho^*}\partial_x p
+= \partial_x\!\left(\frac{p A}{\rho^*}\right)
+- \frac{p}{\rho^*}\partial_x A.
+\]
+
+因此若通量含 \(pA/\rho^*\)，右端必须同时含 \((p/\rho^*)\partial_x A\)，才与标准式 \((A/\rho^*)\partial_x p\) 等价。旧实现缺少该项，在 \(A_0(x)\) 变化（狭窄、锥度）处会引入虚假压力梯度，表现为狭窄附近非物理压力巨跳、近端面积塌缩，进而出现入口压低于出口压等不合理结果。
+
+文献对照（守恒型 + geometrical source / well-balanced）：
+
+- Ghigo et al., *J. Comput. Phys.* 2016, https://doi.org/10.1016/j.jcp.2016.11.032
+- Delestre & Lagrée, *Int. J. Numer. Meth. Fluids* 2013（well-balanced blood flow）
+- Formaggia, Lamponi, Quarteroni, *J. Eng. Math.* 2003
+
+本仓库采用更直接的 **压力梯度源项形式**（§3.1），而不采用「\(pA/\rho^*\) 进通量再补 \((p/\rho^*)\partial_x A\)」的等价改写。
 
 ### 3.2 管壁弹性律（Tube Law）
 
@@ -105,9 +151,9 @@ p(A, x) = P_{\mathrm{ref}} + \beta(x)\,\bigl(\sqrt{A} - \sqrt{A_0(x)}\bigr)
 
 - \(A_0(x)\)：用户给定的**参考管腔面积**（无应力或影像分割得到的基线面积）
 - \(\beta(x)\)：管壁刚度（mmHg / cm）
-- \(P_{\mathrm{ref}}\)：参考压力（默认 `coronary_constants.P_INLET_REF_MMHG`，80 mmHg）
+- \(P_{\mathrm{ref}}\)：参考压力（默认 `coronary_constants.P_INLET_REF_MMHG`）
 
-**压力不单独求解散射方程**，每个时间步由当前 \(A\) 通过上式在网格中心得到 \(p_i\)。
+**压力不单独求解散射方程**，每个时间步由当前 \(A\) 通过上式在网格中心得到 \(p_i\)，并用于动量源项中的 \(\partial_x p\)。
 
 #### 3.2.1 管腔压 \(p\) 的物理含义
 
@@ -116,10 +162,10 @@ p(A, x) = P_{\mathrm{ref}} + \beta(x)\,\bigl(\sqrt{A} - \sqrt{A_0(x)}\bigr)
 | 用途 | 机制 |
 |------|------|
 | **tube law** | 将标量 \(p\) 与截面积 \(A\) 耦合，描述管腔**径向胀缩**（壁弹性） |
-| **动量通量** \(\partial(pA/\rho^*)/\partial x\) | 沿 \(x\) 的**压力梯度**驱动轴向体积流量 \(Q\) |
+| **动量源项** \(-(A/\rho^*)\partial_x p\) | 沿 \(x\) 的**压力梯度**驱动轴向体积流量 \(Q\) |
 | **`pressure[i]`** | 轴向位置 \(x_i\) 处的管腔压取值；`p(x)` 表示沿程分布，非方向性矢量 |
 
-小扰动压力波速（与 §4.3 CFL 及 `_wave_speed` 一致）：
+小扰动压力波速（与 §4.3 CFL 及 `_wave_speed` 一致；由 tube law 线性化 \(\partial p/\partial A\) 得到）：
 
 \[
 c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
@@ -313,6 +359,34 @@ P_wk   ← 步末 advance：C·dP_wk/dt = Q_drive − P_wk/R_d
 ```
 
 默认 \(R_d = P_{\mathrm{ref}} / Q_{\mathrm{mean}}\)，\(R_p = 0.12\, R_d\)（与 `coronary_outlet` 默认标定一致）。详见 [`coronary_outlet.md`](coronary_outlet.md)。
+
+### 5.2.1 侧支 Windkessel（压力驱动分流）
+
+每个侧支开口接独立的 0D Windkessel（`branch_outlets[k]`），与主支出口同构；Murray 份额 \(f_i\) **只用于**按 \(1/f_i\) 放大 \(R_d,R_p\)、按 \(f_i\) 缩小 \(C\)，使并联终端标定与总冠脉阻力一致。
+
+**耦合方式（与出口相反）**：
+
+| | 主支远端出口 | 侧支开口 |
+|---|---|---|
+| 1D 提供 | \(Q(L)\)（PDE） | \(P_{\mathrm{ostium}}=p(A_j)\)（tube law） |
+| 0D 反解 | \(P_{\mathrm{lumen}}\) → 定 \(A(L)\) | \(Q_b\) → 质量汇 \(-Q_b/\Delta x\) |
+| 不强制 | \(Q(L)=P_{\mathrm{wk}}/R_d\) | 开口 \(A_j\)（由主支方程自由演化） |
+
+分流量：
+
+\[
+Q_b = \frac{P_{\mathrm{ostium}} - P_{\mathrm{wk}}}{R_{\mathrm{coup}}},
+\qquad
+R_{\mathrm{coup}} =
+\begin{cases}
+R_p & \text{3wk}\\
+R_d & \text{2wk}
+\end{cases}
+\]
+
+ODE 仍为 \(C\,\mathrm{d}P_{\mathrm{wk}}/\mathrm{d}t = Q_b - P_{\mathrm{wk}}/R_d\)。因此当狭窄抬高近端开口压时，\(Q_b\) 自动增大——即“狭窄越重、近端侧支分得越多”。
+
+RK 节拍与出口相同：子步 `apply_substep_from_pressure`（冻结 \(P_{\mathrm{wk}}\)），完整步末 `advance_from_pressure`。
 
 ### 5.3 物理下限
 
@@ -803,7 +877,7 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
 
 ## 13. 限制与扩展方向
 
-1. **单支、单出口** 1D 模型，无分叉与侧支流量分配（`coronary_outlet.coronary_outlet_flow_distribution` 未接入）。
+1. **单支主通道 + 侧支质量汇** 1D 模型；侧支为 0D Windkessel 压力驱动分流（非完整 1D 分叉树）。
 2. 出口为 **Windkessel–tube law 耦合**，非特征非反射边界；与纯 prescribed \(P(t)\) 或纯 \(Q\) 外推不同。
 3. 摩擦为线性 Poiseuille，未含湍流、弯曲损失等。
 4. **FFR** 为简化压比，非临床标准。

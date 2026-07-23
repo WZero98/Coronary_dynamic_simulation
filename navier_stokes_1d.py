@@ -4,13 +4,19 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 依据一维可变形管内的守恒型 Navier-Stokes 方程组，耦合管壁弹性压力关系，
 对沿血管轴向 x ∈ [0, L] 的截面积 A 与体积流量 Q 进行数值求解。
 
-控制方程（守恒形式，长度/面积/流量用 CGS，管腔压 p 用 mmHg）
+控制方程（长度/面积/流量用 CGS，管腔压 p 用 mmHg）
 ------------------------------------------------------------
     ∂U/∂t + ∂F/∂x = S,    U = [A, Q]ᵀ
 
     F₀ = Q
-    F₁ = α·Q²/A + p_mmHg(A)·A/ρ*
-    S  = [0, −8πμ·Q/A]ᵀ
+    F₁ = α·Q²/A                         （仅对流；不含 pA/ρ*）
+    S  = [0, −(A/ρ*)·∂p/∂x − 8πμ·Q/A]ᵀ
+
+    等价于文献标准式：
+        ∂Q/∂t + ∂(α Q²/A)/∂x + (A/ρ*) ∂p/∂x = −8πμ Q/A
+
+    注意：旧版曾写 F₁ = α Q²/A + p A/ρ* 且无 (p/ρ*)∂A/∂x 源项，
+    与上式不等价，变截面处会产生虚假压力梯度（见 docs/navier_stokes_1d.md §3.1.1）。
 
     ρ* = ρ / (1333.22 g·cm⁻¹·s⁻² per mmHg)，在 BloodFlowParameters 中一次性标定；
     与逐点把 p 换成 dyne/cm² 再代入原式等价。
@@ -20,23 +26,24 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
     p(A, x) = P_ref + β(x)·(√A − √A₀(x))
 
     p 为管腔标量压（各向同性，非轴向/径向矢量分量）。tube law 将其与截面面积 A 耦合
-    （径向胀缩）；动量通量中 ∂(pA)/∂x 则体现沿 x 的压力梯度对轴向流量 Q 的驱动。
+    （径向胀缩）；动量源项 −(A/ρ*)∂p/∂x 体现沿 x 的压力梯度对轴向流量 Q 的驱动。
 
     A₀(x) 由用户给定的沿程管腔参考面积描述；β(x) 为管壁刚度（可常数或随 x 给定）。
 
 边界条件
 --------
 - 入口：coronary_inlet.coronary_inlet_flow 提供生理脉动入口流量 Q_in(t)（mL/s ≡ cm³/s）
-- 侧支：Murray 定律分配 Q_b = f_i·Q_in，0D Windkessel 提供开口压并反解 A；
-        连续方程在开口单元含质量汇 −Q_b/Δx（侧支视为均匀管腔终端）
+- 侧支：各开口接 0D Windkessel；由主支开口管腔压 P_ostium 反解
+        Q_b=(P_ostium−P_wk)/R_coup（3wk 用 R_p，2wk 用 R_d），
+        连续方程质量汇 −Q_b/Δx；Murray 份额仅用于标定各支 R、C（flow_share）
 - 出口：主支远端 Windkessel；C·dP_wk/dt = Q(L) − P_wk/R_d，再反解 A(L)
 
 初值（构造 `NavierStokes1D` 时完成）
 ------------------------------------
 - A(x,0) = A₀(x)（经近/远端参考段平整；狭窄段自动放大 β）
-- Q(x,0) = Q_in(0)
-- P_wk(0) = Q_mean·R_d；3wk 时 P_lumen(0)=P_wk+R_p·Q_in(0)，
-  并将 p_ref 更新为 P_wk+R_p·Q_mean 与出口管腔压对齐
+- Q(x,0) 按 Murray 份额沿程分流剖面
+- 主支远端 P_wk(0) = Q_mean·f_distal·R_d
+- p_ref 保持 BloodFlowParameters 给定值，不由出口 Windkessel 覆盖
 
 主要输入
 --------
@@ -72,7 +79,7 @@ def lumen_pressure_mmhg(
     """由 tube law 计算管腔标量压 p（mmHg）：p = P_ref + β(√A − √A₀)。
 
     p 为各向同性热力学压强，非某一坐标方向的应力分量；此处由 A 闭合，
-    用于 tube law 径向胀缩关系及动量方程中的 ∂(pA)/∂x 项。
+    用于 tube law 径向胀缩关系及动量源项 −(A/ρ*)∂p/∂x。
     """
     a0 = np.asarray(area_ref, dtype=float)
     a = np.maximum(np.asarray(area, dtype=float), MINIMUM_AREA_RATIO * a0)
@@ -92,7 +99,7 @@ def area_from_lumen_pressure_mmhg(
     p = np.asarray(pressure, dtype=float)
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
     return np.maximum(sqrt_a**2, MINIMUM_AREA_RATIO * a0)
-    
+
 # ---------------------------------------------------------------------------
 # TVD / MUSCL / HLL
 # ---------------------------------------------------------------------------
@@ -106,7 +113,7 @@ def _minmod(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def _muscl_states(
-    U: np.ndarray, 
+    U: np.ndarray,
     area_ref: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """单元界面 j+1/2 的左右重构状态（内部界面）。"""
@@ -139,17 +146,16 @@ def _wave_speed(
 def _flux_vector(
     area: np.ndarray,
     flow: np.ndarray,
-    area_ref: np.ndarray,
-    beta: np.ndarray,
-    rho_mmhg: float,
     alpha: float,
-    p_ref: float,
 ) -> np.ndarray:
-    """物理通量 F(U)；p 由 tube law 直接以 mmHg 代入动量项。"""
+    """物理通量 F(U)：质量通量 Q，动量通量仅对流项 α Q²/A。
+
+    压力梯度不以 pA/ρ* 进入通量（旧错误写法），而由空间算子中的
+    −(A/ρ*) ∂p/∂x 源项施加，与标准 1D 血流方程一致。
+    """
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     q = np.asarray(flow, dtype=float)
-    p_mmhg = lumen_pressure_mmhg(a, area_ref, beta, p_ref)
-    return np.vstack([q, alpha * q**2 / a + p_mmhg * a / rho_mmhg])
+    return np.vstack([q, alpha * q**2 / a])
 
 
 def _hll_flux(
@@ -157,13 +163,14 @@ def _hll_flux(
     u_r: np.ndarray,
     beta_l: np.ndarray,
     beta_r: np.ndarray,
-    a0_l: np.ndarray,
-    a0_r: np.ndarray,
     rho_mmhg: float,
     alpha: float,
-    p_ref: float,
 ) -> np.ndarray:
-    """HLL Riemann 求解器计算界面数值通量。"""
+    """HLL Riemann 求解器计算界面数值通量（对流部分）。
+
+    波速估计仍用弹性波速 u±c，使 CFL/耗散与压力波尺度一致；
+    压力驱动本身在单元中心以 −(A/ρ*)∂p/∂x 处理。
+    """
     # 管腔截面积左右状态
     a_l = np.maximum(u_l[0], 1e-12)
     a_r = np.maximum(u_r[0], 1e-12)
@@ -178,8 +185,8 @@ def _hll_flux(
     s_l = np.minimum(np.minimum(uvel_l - c_l, uvel_r - c_r), 0)
     s_r = np.maximum(np.maximum(uvel_l + c_l, uvel_r + c_r), 0)
 
-    f_l = _flux_vector(a_l, q_l, a0_l, beta_l, rho_mmhg, alpha, p_ref)
-    f_r = _flux_vector(a_r, q_r, a0_r, beta_r, rho_mmhg, alpha, p_ref)
+    f_l = _flux_vector(a_l, q_l, alpha)
+    f_r = _flux_vector(a_r, q_r, alpha)
     f = np.zeros_like(f_l)
 
     # 根据波速值，选对应的通量
@@ -253,6 +260,13 @@ class BloodFlowParameters:
             ),
             dtype=float,
         )
+    
+    def inlet_pressure(self, t: float | np.ndarray) -> np.ndarray:
+        rd = 12
+        p_remain = 56
+        inlet_flow = self.inlet_flow(t)
+        inlet_p = inlet_flow * rd + p_remain
+        return inlet_p
 
     def resolve_outlet_resistances(self) -> tuple[float, float]:
         """远端/近端阻力 (mmHg·s/mL)，与 coronary_outlet 默认标定一致。"""
@@ -270,7 +284,7 @@ class BloodFlowParameters:
         return r_d, r_p
 
     def momentum_rho(self) -> float:
-        """与 mmHg 制管腔压配对的动量通量/波速有效密度 ρ*。"""
+        """与 mmHg 制管腔压配对的有效密度 ρ*（用于 (A/ρ*)∂p/∂x 与波速）。"""
         return rho_for_mmhg_pressure_coupling(self.rho)
 
 
@@ -283,6 +297,14 @@ class OutletWindkesselState:
 
     flow_share : 该终端占入口平均流量的 Murray 份额；阻力按 1/share 放大，
     顺应性按 share 缩小，使并联终端在均值上与单出口标定一致。
+
+    两种耦合用法
+    ------------
+    - 主支远端出口：由管腔流量 Q(L) 驱动，反解 P_lumen → 定 A(L)
+      （``apply_substep`` / ``advance``）
+    - 侧支开口：由主支开口管腔压 P_ostium 驱动，反解分流量 Q_b
+      （``apply_substep_from_pressure`` / ``advance_from_pressure``）
+      从而使狭窄抬高近端压时，近端侧支自动多分流量。
     """
 
     def __init__(self, params: BloodFlowParameters, flow_share: float = 1.0):
@@ -294,11 +316,6 @@ class OutletWindkesselState:
         self.r_d = r_d0 / share
         self.r_p = r_p0 / share
         self.c = max(params.outlet_compliance_ml_per_mmhg * share, 1e-9)
-        q_mean = params.mean_coronary_flow_ml_s() * share
-        self.p_wk = q_mean * self.r_d
-        self.p_lumen = self.p_wk + (
-            self.r_p * q_mean if self.is_three_element else 0.0
-        )
 
     def reset(
         self,
@@ -321,17 +338,31 @@ class OutletWindkesselState:
             return self.p_wk + self.r_p * float(q_drive)
         return self.p_wk
 
+    def coupling_resistance(self) -> float:
+        """由管腔压反解流量时的串联阻力：3wk 用 R_p，2wk 用 R_d。"""
+        if self.is_three_element:
+            return max(self.r_p, 1e-9)
+        return max(self.r_d, 1e-9)
+
+    def flow_from_lumen_pressure(self, p_lumen: float) -> float:
+        """给定开口/出口管腔压，反解进入 Windkessel 的流量 Q_drive。
+
+        3wk: Q = (P_lumen − P_wk) / R_p
+        2wk: Q = (P_lumen − P_wk) / R_d
+        """
+        return (float(p_lumen) - self.p_wk) / self.coupling_resistance()
+
     def outlet_flow_from_state(self) -> float:
         """微循环侧出流 Q_venous = P_wk/R_d。"""
         return self.p_wk / max(self.r_d, 1e-9)
 
     def apply_substep(self, q_lumen: float) -> tuple[float, float]:
-        """SSP-RK 子步：冻结 P_wk，返回 (Q_venous, P_lumen)。"""
+        """SSP-RK 子步（流量驱动）：冻结 P_wk，返回 (Q_venous, P_lumen)。"""
         q_drive = float(q_lumen)
         return self.outlet_flow_from_state(), self.lumen_pressure(q_drive)
 
     def advance(self, dt: float, q_lumen: float) -> tuple[float, float]:
-        """完整时间步末：C·dP_wk/dt = Q_drive − P_wk/R_d。"""
+        """完整时间步末（流量驱动）：C·dP_wk/dt = Q_drive − P_wk/R_d。"""
         if dt <= 0.0:
             return self.apply_substep(q_lumen)
         q_drive = float(q_lumen)
@@ -341,6 +372,23 @@ class OutletWindkesselState:
         self.p_lumen = self.lumen_pressure(q_drive)
         return self.outlet_flow_from_state(), self.p_lumen
 
+    def apply_substep_from_pressure(self, p_lumen: float) -> float:
+        """SSP-RK 子步（压力驱动）：冻结 P_wk，返回 Q_drive。"""
+        q_drive = self.flow_from_lumen_pressure(p_lumen)
+        self.p_lumen = float(p_lumen)
+        return q_drive
+
+    def advance_from_pressure(self, dt: float, p_lumen: float) -> float:
+        """完整时间步末（压力驱动）：由 P_lumen 得 Q，再推进 P_wk。"""
+        q_drive = self.flow_from_lumen_pressure(p_lumen)
+        if dt > 0.0:
+            self.p_wk += (dt / self.c) * (
+                q_drive - self.p_wk / max(self.r_d, 1e-9)
+            )
+            # 推进后用新 P_wk 与同一 P_lumen 再一致化一次 Q
+            q_drive = self.flow_from_lumen_pressure(p_lumen)
+        self.p_lumen = float(p_lumen)
+        return q_drive
 
 # ---------------------------------------------------------------------------
 # 主求解器
@@ -400,6 +448,7 @@ class NavierStokes1D:
                 f"area 长度 ({self.area_ref.shape[0]}) 须等于 n_nodes ({self.nx})"
             )
 
+        # #######其它状态初值设置#######
         # 狭窄检测与 β 放大
         self.prox_idx, self.dist_idx = select_reference_indices(self.area_ref)
         self.lesions = detect_stenoses(self.area_ref, self.prox_idx, self.dist_idx)
@@ -434,41 +483,52 @@ class NavierStokes1D:
             for b in self.side_branches:
                 print(
                     f"  frame={b.frame_index}, D={b.diameter_cm:.4f} cm, "
-                    f"f={b.flow_fraction:.3f}, Q_b≈{b.flow_fraction * self.paras.mean_coronary_flow_ml_s():.4f} mL/s"
+                    f"Murray share f={b.flow_fraction:.3f} (WK R/C 标定), "
+                    f"Q_share≈{b.flow_fraction * self.paras.mean_coronary_flow_ml_s():.4f} mL/s"
                 )
 
-        # 主支远端 + 各侧支 Windkessel（阻力按 Murray 份额标定）
+        # 主支远端 + 各侧支 Windkessel（Murray share 标定 R、C）
         self.outlet = OutletWindkesselState(
             self.paras, flow_share=self.distal_flow_fraction
         )
         self.branch_outlets = [
-            OutletWindkesselState(self.paras, flow_share=max(b.flow_fraction, 1e-6))
+            OutletWindkesselState(
+                self.paras, flow_share=max(b.flow_fraction, 1e-6)
+            )
             for b in self.side_branches
         ]
 
         q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
         q_mean = self.paras.mean_coronary_flow_ml_s()
+        p_ref = float(self.paras.p_ref_mmhg)
         self.outlet.reset(
             p_wk=q_mean * self.distal_flow_fraction * self.outlet.r_d,
             q_drive=q0 * self.distal_flow_fraction,
         )
-        for b, wk in zip(self.side_branches, self.branch_outlets):
-            wk.reset(
-                p_wk=q_mean * b.flow_fraction * wk.r_d,
-                q_drive=q0 * b.flow_fraction,
-            )
-        if self.outlet.is_three_element:
-            # tube law 锚点与主支远端出口稳态管腔压对齐
-            self.paras.p_ref_mmhg = (
-                self.outlet.p_wk + self.outlet.r_p * q_mean * self.distal_flow_fraction
-            )
+        # 侧支：按 P≈p_ref 时 Q_b≈Murray 份额初始化 P_wk，便于起步
+        for br, wk in zip(self.side_branches, self.branch_outlets):
+            q_share = q_mean * br.flow_fraction
+            r_coup = wk.coupling_resistance()
+            wk.reset(p_wk=p_ref - r_coup * q_share, q_drive=q_share)
+        # 注意：不再用 3wk 出口稳态压覆盖 p_ref_mmhg
 
         self.state[0] = self.area_ref.copy()
         self.state[1] = self._main_flow_profile(q0)
-        self._branch_outflow = np.array(
-            [b.flow_fraction * q0 for b in self.side_branches], dtype=float
-        )
         self._update_pressure()
+        self._branch_outflow = np.array(
+            [
+                wk.flow_from_lumen_pressure(float(self.pressure[br.frame_index]))
+                for br, wk in zip(self.side_branches, self.branch_outlets)
+            ],
+            dtype=float,
+        )
+        print(
+            f"p_ref={self.paras.p_ref_mmhg:.2f} mmHg (fixed); "
+            f"outlet P_wk0={self.outlet.p_wk:.2f}, P_lumen0={self.outlet.p_lumen:.2f} mmHg"
+        )
+        if self.branch_outlets:
+            qb0 = ", ".join(f"{q:.3f}" for q in self._branch_outflow)
+            print(f"side-branch WK: n={len(self.branch_outlets)}, Q_b0=[{qb0}] mL/s")
 
     def _main_flow_profile(self, q_in: float) -> np.ndarray:
         """按 Murray 份额沿程累减侧支分流后的主支轴向流量初值/参考剖面。"""
@@ -490,30 +550,33 @@ class NavierStokes1D:
         return self.pressure
 
     def _apply_side_branches(
-        self, state: np.ndarray, q_in: float, advance: bool = False
-    ) -> np.ndarray:
-        """侧支：Murray 分流 Q_b=f_i·Q_in → Windkessel → 开口处用 P_lumen 反解 A。"""
-        u = state
-        for k, (br, wk) in enumerate(zip(self.side_branches, self.branch_outlets)):
-            q_b = max(br.flow_fraction * float(q_in), 0.0)
-            self._branch_outflow[k] = q_b
-            if advance and self._outlet_dt > 0.0:
-                _, p_b = wk.advance(self._outlet_dt, q_b)
+        self, state: np.ndarray, advance: bool = False
+    ) -> None:
+        """侧支：由开口管腔压经 Windkessel 反解 Q_b（质量汇）；不强制开口 A。
+
+        Q_b = (P_ostium − P_wk) / R_coup，故近端压因狭窄升高时分流自动增大。
+        """
+        if not self.side_branches:
+            return
+        p = lumen_pressure_mmhg(
+            state[0], self.area_ref, self.beta, self.paras.p_ref_mmhg
+        )
+        dt = self._outlet_dt if advance else 0.0
+        for k, (br, wk) in enumerate(
+            zip(self.side_branches, self.branch_outlets)
+        ):
+            p_ost = float(p[br.frame_index])
+            if advance and dt > 0.0:
+                self._branch_outflow[k] = wk.advance_from_pressure(dt, p_ost)
             else:
-                _, p_b = wk.apply_substep(q_b)
-            j = br.frame_index
-            u[0, j] = float(
-                area_from_lumen_pressure_mmhg(
-                    p_b,
-                    self.area_ref[j],
-                    self.beta[j],
-                    self.paras.p_ref_mmhg,
-                )
-            )
-        return u
+                self._branch_outflow[k] = wk.apply_substep_from_pressure(p_ost)
 
     def _spatial_operator(self, state: np.ndarray) -> np.ndarray:
-        """有限体积右端项：−∂F/∂x + S；侧支处连续方程含质量汇 −Q_b/Δx。"""
+        """有限体积右端项：−∂F/∂x + S。
+
+        F 仅含对流；压力驱动为 −(A/ρ*)∂p/∂x；摩擦 −8πμ Q/A；
+        侧支处连续方程含质量汇 −Q_b/Δx。
+        """
         u_l, u_r = _muscl_states(state, self.area_ref)
         n_if = self.nx - 1
         j = np.arange(n_if)
@@ -523,35 +586,36 @@ class NavierStokes1D:
             u_r,
             self.beta[j],
             self.beta[j + 1],
-            self.area_ref[j],
-            self.area_ref[j + 1],
             rho_star,
             self.paras.alpha,
-            self.paras.p_ref_mmhg,
         )
         f_face = np.zeros((2, self.nx + 1))
         f_face[:, 1:-1] = f_inner
         f_face[:, 0] = _flux_vector(
-            state[0, 0],
-            state[1, 0],
-            self.area_ref[0],
-            self.beta[0],
-            rho_star,
-            self.paras.alpha,
-            self.paras.p_ref_mmhg,
+            state[0, 0], state[1, 0], self.paras.alpha
         ).ravel()
         f_face[:, -1] = _flux_vector(
-            state[0, -1],
-            state[1, -1],
-            self.area_ref[-1],
-            self.beta[-1],
-            rho_star,
-            self.paras.alpha,
-            self.paras.p_ref_mmhg,
+            state[0, -1], state[1, -1], self.paras.alpha
         ).ravel()
 
         dudt = -(f_face[:, 1:] - f_face[:, :-1]) / self.dx
         a = np.maximum(state[0], 1e-12)
+
+        # 压力梯度源项：−(A/ρ*) ∂p/∂x（p 由 tube law 在单元中心计算）
+        p = lumen_pressure_mmhg(
+            state[0], self.area_ref, self.beta, self.paras.p_ref_mmhg
+        )
+        dpdx = np.empty(self.nx, dtype=float)
+        if self.nx >= 3:
+            dpdx[1:-1] = (p[2:] - p[:-2]) / (2.0 * self.dx)
+            dpdx[0] = (p[1] - p[0]) / self.dx
+            dpdx[-1] = (p[-1] - p[-2]) / self.dx
+        elif self.nx == 2:
+            dpdx[:] = (p[1] - p[0]) / self.dx
+        else:
+            dpdx[:] = 0.0
+        dudt[1] -= a * dpdx / rho_star
+
         dudt[1] -= 8.0 * np.pi * self.paras.mu * state[1] / a
 
         # 侧支质量汇：主支连续方程 ∂A/∂t + ∂Q/∂x = −q_branch
@@ -566,10 +630,13 @@ class NavierStokes1D:
         q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
         u[1, 0] = q_in
 
-        # 侧支 Murray 分流 + Windkessel 定压（反解 A）
-        u = self._apply_side_branches(u, q_in, advance=advance_outlet)
+        # 入口面积：零梯度外推（压力由 tube law 从 A 得到）
+        u[0, 0] = u[0, 1]
 
-        # 主支远端出口
+        # 侧支：Windkessel 压力驱动分流（与主支出口同节拍推进）
+        self._apply_side_branches(u, advance=advance_outlet)
+
+        # 主支远端出口：Windkessel → P → A
         q_lumen = float(u[1, -1])
         if advance_outlet and self._outlet_dt > 0.0:
             _, p_out = self.outlet.advance(self._outlet_dt, q_lumen)
@@ -664,6 +731,7 @@ class NavierStokes1D:
         self.history_branch_flow = np.array(qb_hist)
         t1 = time.perf_counter()
         print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
+        self.print_pressure_diagnostics()
         return (
             self.history_area,
             self.history_flow,
@@ -671,18 +739,97 @@ class NavierStokes1D:
             self.history_time,
         )
 
+    def pressure_diagnostics(
+        self, warmup_fraction: float = 0.5
+    ) -> dict[str, float]:
+        """近端/远端（及入口/出口）压力诊断，便于检查是否出现 p_prox < p_dist。"""
+        ip = int(self.prox_idx)
+        id_ = int(self.dist_idx)
+        p_ref = float(self.paras.p_ref_mmhg)
+
+        if self.history_pressure is None:
+            p = self.pressure
+            p_in, p_out = float(p[0]), float(p[-1])
+            p_prox, p_dist = float(p[ip]), float(p[id_])
+            return {
+                "p_ref_mmhg": p_ref,
+                "p_in_mean": p_in,
+                "p_out_mean": p_out,
+                "p_prox_mean": p_prox,
+                "p_dist_mean": p_dist,
+                "dp_prox_minus_dist": p_prox - p_dist,
+                "dp_in_minus_out": p_in - p_out,
+                "prox_idx": float(ip),
+                "dist_idx": float(id_),
+            }
+
+        n = self.history_pressure.shape[0]
+        i0 = int(max(n * warmup_fraction, 0))
+        p_avg = np.mean(self.history_pressure[i0:], axis=0)
+        p_in, p_out = float(p_avg[0]), float(p_avg[-1])
+        p_prox, p_dist = float(p_avg[ip]), float(p_avg[id_])
+        return {
+            "p_ref_mmhg": p_ref,
+            "p_in_mean": p_in,
+            "p_out_mean": p_out,
+            "p_prox_mean": p_prox,
+            "p_dist_mean": p_dist,
+            "dp_prox_minus_dist": p_prox - p_dist,
+            "dp_in_minus_out": p_in - p_out,
+            "p_prox_min": float(np.min(self.history_pressure[i0:, ip])),
+            "p_prox_max": float(np.max(self.history_pressure[i0:, ip])),
+            "p_dist_min": float(np.min(self.history_pressure[i0:, id_])),
+            "p_dist_max": float(np.max(self.history_pressure[i0:, id_])),
+            "inversion_fraction": float(
+                np.mean(
+                    self.history_pressure[i0:, ip] < self.history_pressure[i0:, id_]
+                )
+            ),
+            "prox_idx": float(ip),
+            "dist_idx": float(id_),
+        }
+
+    def print_pressure_diagnostics(
+        self, warmup_fraction: float = 0.5
+    ) -> dict[str, float]:
+        """打印近端/远端压力对照；返回诊断字典。"""
+        stats = self.pressure_diagnostics(warmup_fraction=warmup_fraction)
+        ip = int(stats["prox_idx"])
+        id_ = int(stats["dist_idx"])
+        tag = (
+            "instant"
+            if self.history_pressure is None
+            else f"mean after {warmup_fraction:.0%}T"
+        )
+        print(
+            f"[P diag {tag}] p_ref={stats['p_ref_mmhg']:.2f} | "
+            f"in={stats['p_in_mean']:.2f} out={stats['p_out_mean']:.2f} "
+            f"(Δ={stats['dp_in_minus_out']:+.2f}) | "
+            f"prox[{ip}]={stats['p_prox_mean']:.2f} dist[{id_}]={stats['p_dist_mean']:.2f} "
+            f"(Δ={stats['dp_prox_minus_dist']:+.2f}) mmHg"
+        )
+        if "inversion_fraction" in stats:
+            print(
+                f"  prox range [{stats['p_prox_min']:.2f}, {stats['p_prox_max']:.2f}], "
+                f"dist range [{stats['p_dist_min']:.2f}, {stats['p_dist_max']:.2f}], "
+                f"p_prox<p_dist fraction={stats['inversion_fraction']:.1%}"
+            )
+        if stats["dp_prox_minus_dist"] < 0.0:
+            print("  !! warning: p_prox < p_dist (pressure inversion)")
+        return stats
+
     def ffr_ratio(self, warmup_fraction: float = 0.5) -> np.ndarray:
         """沿程压力 FFR：时间平均 p(x) / p(prox)，期望单调非增。"""
-        if self.history_flow is None:
-            q_mean = self.state[1, :].copy()
+        if self.history_pressure is None:
+            p_mean = self.pressure.copy()
         else:
-            n = self.history_flow.shape[0]
+            n = self.history_pressure.shape[0]
             i0 = int(max(n * warmup_fraction, 0))
-            q_mean = np.mean(self.history_flow[i0:], axis=0)
-        q0 = float(q_mean[self.prox_idx])
-        if q0 <= 1e-9:
+            p_mean = np.mean(self.history_pressure[i0:], axis=0)
+        p0 = float(p_mean[self.prox_idx])
+        if p0 <= 1e-9:
             return np.ones(self.nx)
-        ffr = q_mean / q0
+        ffr = p_mean / p0
         return np.clip(ffr, 0.0, 1.0)
     
     def plot_results(self):
@@ -762,7 +909,7 @@ class NavierStokes1D:
 
         tt = self.history_time
         xx = self.x
-        t_end = float(tt[-1])
+        t_show = float(tt[-100])
 
         fig = make_subplots(
             rows=2,
@@ -771,7 +918,7 @@ class NavierStokes1D:
                 "A(t, x) [cm²]",
                 "FFR pullback (pressure)",
                 "x = 近端(blue) / 远端(red)",
-                f"t = {t_end:.3f} s",
+                f"t = {t_show:.3f} s",
             ),
             specs=[[{}, {}], [{}, {"secondary_y": True}]],
             vertical_spacing=0.12,
@@ -815,11 +962,11 @@ class NavierStokes1D:
         fig.add_trace(
             go.Scatter(
                 x=tt,
-                y=self.history_flow[:, self.prox_idx],
+                y=self.history_pressure[:, self.prox_idx],
                 mode="lines",
                 name="x=0",
                 line=dict(color="blue", width=1.5),
-                hovertemplate="t=%{x:.4f} s<br>Q=%{y:.3f} cm³/s<extra></extra>",
+                hovertemplate="t=%{x:.4f} s<br>P=%{y:.3f} mmHg<extra></extra>",
             ),
             row=2,
             col=1,
@@ -827,11 +974,11 @@ class NavierStokes1D:
         fig.add_trace(
             go.Scatter(
                 x=tt,
-                y=self.history_flow[:, self.dist_idx],
+                y=self.history_pressure[:, self.dist_idx],
                 mode="lines",
                 name=f"x={self.dist_idx}",
                 line=dict(color="red", width=1.5),
-                hovertemplate="t=%{x:.4f} s<br>Q=%{y:.3f} cm³/s<extra></extra>",
+                hovertemplate="t=%{x:.4f} s<br>P=%{y:.3f} mmHg<extra></extra>",
             ),
             row=2,
             col=1,
@@ -840,7 +987,7 @@ class NavierStokes1D:
         fig.add_trace(
             go.Scatter(
                 x=xx,
-                y=self.history_area[-1],
+                y=self.history_area[-100],
                 mode="lines",
                 name="A",
                 line=dict(color="blue", width=1.5),
@@ -852,11 +999,11 @@ class NavierStokes1D:
         fig.add_trace(
             go.Scatter(
                 x=xx,
-                y=self.history_flow[-1],
+                y=self.history_pressure[-100],
                 mode="lines",
                 name="Q",
                 line=dict(color="green", width=1.5, dash="dash"),
-                hovertemplate="x=%{x:.3f} cm<br>Q=%{y:.3f} cm³/s<extra></extra>",
+                hovertemplate="x=%{x:.3f} cm<br>P=%{y:.3f} mmHg<extra></extra>",
             ),
             row=2,
             col=2,
@@ -865,13 +1012,13 @@ class NavierStokes1D:
 
         fig.update_xaxes(title_text="t (s)", row=1, col=1)
         fig.update_yaxes(title_text="x (cm)", row=1, col=1)
-        fig.update_xaxes(title_text="Axial distance (cm)", row=1, col=2)
+        fig.update_xaxes(title_text="x (cm)", row=1, col=2)
         fig.update_yaxes(title_text="FFR", row=1, col=2)
         fig.update_xaxes(title_text="t (s)", row=2, col=1)
-        fig.update_yaxes(title_text="Q (cm³/s)", row=2, col=1)
+        fig.update_yaxes(title_text="P (mmHg)", row=2, col=1)
         fig.update_xaxes(title_text="x (cm)", row=2, col=2)
         fig.update_yaxes(title_text="A (cm²)", row=2, col=2)
-        fig.update_yaxes(title_text="Q (cm³/s)", row=2, col=2, secondary_y=True)
+        fig.update_yaxes(title_text="P (mmHg)", row=2, col=2, secondary_y=True)
 
         fig.update_layout(
             height=1000,
@@ -895,17 +1042,17 @@ def demo():
     import os
 
     name = 'ZQJ_240217_172752'
-    dirname = f"D:/WPY/Projects/FFR_test/lumen_area/{name}"
+    dirname = f"data/pred_masks20260721"
     np.random.seed(2034)
     sigma_nodes = 4
     duration_s = 3.0
 
-    # 原始 npy：面积为 mm²，直径为 mm，帧间距 0.3 mm → 读入后一律换成 cm / cm²
+    # 原始 npy：面积为 mm²，直径为 mm，读入后一律换成 cm / cm²
     area_file = np.load(os.path.join(dirname, "area.npy"))
     area = area_file[::-1] / 100.0  # mm² → cm²
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area_smooth.shape[0]
-    length = 0.02 * nx  
+    length = 0.03 * nx  
     print(nx, length)
 
     prox_idx, dist_idx = select_reference_indices(area_smooth)
@@ -934,7 +1081,7 @@ def demo():
         parameters,
         branch_frame_indices=merged_idx,
         branch_diameters_cm=merged_d,  
-        apply_murray_scale=False,
+        apply_murray_scale=True,
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results_1(title=name)

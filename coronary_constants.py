@@ -9,11 +9,11 @@ coronary_inlet、coronary_outlet、navier_stokes_1d 等统一引用。
 from typing import Final
 
 # 压力单位换算（mmHg ↔ cgs / dyne·cm⁻²）
-MMHG_TO_DYNE_PER_CM2: Final[float] = 1333.22
+MMHG_TO_DYNE_PER_CM2: Final[float] = 10 * 133.32
 DYNE_PER_CM2_TO_MMHG: Final[float] = 1.0 / MMHG_TO_DYNE_PER_CM2
 
-# 入口/出口 tube law 与 Windkessel 阻力标定用的参考管腔压 (mmHg)
-P_INLET_REF_MMHG: Final[float] = 70.0
+# 入口/出口 tube law 阻力标定用的参考管腔压 (mmHg)
+P_INLET_REF_MMHG: Final[float] = 88.0
 
 # 最小管腔面积占参考面积比例
 MINIMUM_AREA_RATIO = 0.8
@@ -21,11 +21,11 @@ MINIMUM_AREA_RATIO = 0.8
 
 def rho_for_mmhg_pressure_coupling(rho_g_per_cm3: float) -> float:
     """
-    动量通量与波速公式中，与 mmHg 制管腔压配对的有效密度 ρ*。
+    与 mmHg 制管腔压配对的有效密度 ρ*（动量源项与波速）。
 
-    守恒方程在 CGS 下要求 p 以 dyne/cm² 代入 F₁ = αQ²/A + pA/ρ。
-    若 tube law 输出 p 为 mmHg，等价写法为 F₁ = αQ²/A + p_mmHg·A/ρ*，
-    其中 ρ* = ρ / MMHG_TO_DYNE_PER_CM2。换算在参数层完成一次即可。
+    CGS 下标准动量式含 (A/ρ) ∂p/∂x，p 为 dyne/cm²。
+    若 tube law 输出 p 为 mmHg，等价为 (A/ρ*) ∂p_mmHg/∂x，
+    其中 ρ* = ρ / MMHG_TO_DYNE_PER_CM2。波速 c = √(β√A/(2ρ*)) 同理。
     """
     return float(rho_g_per_cm3) / MMHG_TO_DYNE_PER_CM2
 
