@@ -1,6 +1,6 @@
 """侧支 Murray 定律：直径闭合与流量分配权重。
 
-仅保留与主支 1D 求解器耦合所需的部分：
+长度/面积一律用 CGS：直径 cm，面积 cm²。
 - D_p^γ = Σ D_d^γ 残差 / 统一尺度因子闭合
 - 终端流量权重 Q ∝ D^γ（默认 γ = 7/3）
 """
@@ -15,7 +15,7 @@ import numpy as np
 
 # Zhou / Kassab / Molloi：冠脉树常用 γ ≈ 7/3；经典 Murray 为 3
 DEFAULT_MURRAY_EXPONENT = 7.0 / 3.0
-MIN_BRANCH_DIAMETER_MM = 0.1
+MIN_BRANCH_DIAMETER_CM = 0.01  # 0.1 mm
 
 
 @dataclass
@@ -23,26 +23,26 @@ class SideBranch:
     """一条侧支（均匀管腔，0D Windkessel 终端）。"""
 
     frame_index: int
-    diameter_mm: float
-    area_mm2: float
+    diameter_cm: float
+    area_cm2: float
     flow_fraction: float = 0.0  # 占入口总流量的 Murray 份额
     source: str = "manual"
 
 
 def diameter_from_area_cm2(area_cm2: float) -> float:
-    """截面积 (cm²) → 等效直径 (mm)。"""
+    """截面积 (cm²) → 等效直径 (cm)。"""
     a = max(float(area_cm2), 1e-12)
-    return 20.0 * np.sqrt(a / np.pi)
+    return 2.0 * np.sqrt(a / np.pi)
 
 
 def diameter_from_murray(
-    parent_diameter_mm: float,
-    daughter_diameters_mm: Sequence[float],
+    parent_diameter_cm: float,
+    daughter_diameters_cm: Sequence[float],
     exponent: float = DEFAULT_MURRAY_EXPONENT,
 ) -> float:
-    """由 D_p^γ = Σ D_d^γ 求缺失子支直径。"""
-    dp = float(parent_diameter_mm) ** exponent
-    known = sum(float(d) ** exponent for d in daughter_diameters_mm)
+    """由 D_p^γ = Σ D_d^γ 求缺失子支直径 (cm)。"""
+    dp = float(parent_diameter_cm) ** exponent
+    known = sum(float(d) ** exponent for d in daughter_diameters_cm)
     residual = dp - known
     if residual <= 0.0:
         return 0.0
@@ -50,17 +50,22 @@ def diameter_from_murray(
 
 
 def scale_branches_to_murray(
-    parent_diameter_mm: float,
-    distal_daughter_mm: float,
-    branch_diameters_mm: Sequence[float],
+    parent_diameter_cm: float,
+    distal_daughter_cm: float,
+    branch_diameters_cm: Sequence[float],
     exponent: float = DEFAULT_MURRAY_EXPONENT,
 ) -> np.ndarray:
-    """统一尺度因子使 D_p^γ = D_distal^γ + Σ (α D_b,i)^γ。"""
-    branches = np.asarray(branch_diameters_mm, dtype=float)
+    """统一尺度因子使 D_p^γ = D_distal^γ + Σ (α D_b,i)^γ（直径均为 cm）。
+
+    注意：缩放后 Σ (α D_b)^γ ≡ D_p^γ − D_distal^γ，与输入直径绝对值无关；
+    仅各侧支之间的相对比例保留。因此总侧支流量份额也不随输入直径变化。
+    若要用实测直径直接决定分流，请设 apply_murray_scale=False。
+    """
+    branches = np.asarray(branch_diameters_cm, dtype=float)
     if len(branches) == 0:
         return branches
 
-    num = float(parent_diameter_mm) ** exponent - float(distal_daughter_mm) ** exponent
+    num = float(parent_diameter_cm) ** exponent - float(distal_daughter_cm) ** exponent
     den = float(np.sum(branches**exponent))
     if num <= 0.0 or den <= 0.0:
         return np.zeros_like(branches)
@@ -70,11 +75,11 @@ def scale_branches_to_murray(
 
 
 def murray_flow_fractions(
-    diameters_mm: Sequence[float],
+    diameters_cm: Sequence[float],
     exponent: float = DEFAULT_MURRAY_EXPONENT,
 ) -> np.ndarray:
-    """终端流量份额：f_i = D_i^γ / Σ D_j^γ。"""
-    d = np.asarray(diameters_mm, dtype=float)
+    """终端流量份额：f_i = D_i^γ / Σ D_j^γ（D 为 cm）。"""
+    d = np.asarray(diameters_cm, dtype=float)
     w = np.maximum(d, 0.0) ** exponent
     s = float(np.sum(w))
     if s <= 0.0:
@@ -88,11 +93,11 @@ def prepare_side_branches(
     prox_idx: int,
     dist_idx: int,
     branch_frame_indices: Optional[Sequence[int]] = None,
-    branch_diameters_mm: Optional[Sequence[float]] = None,
+    branch_diameters_cm: Optional[Sequence[float]] = None,
     *,
     murray_exponent: float = DEFAULT_MURRAY_EXPONENT,
-    apply_murray_scale: bool = True,
-    min_diameter_mm: float = MIN_BRANCH_DIAMETER_MM,
+    apply_murray_scale: bool = False,
+    min_diameter_cm: float = MIN_BRANCH_DIAMETER_CM,
 ) -> tuple[List[SideBranch], float]:
     """构造侧支列表，并返回主支远端终端的 Murray 流量份额。
 
@@ -102,22 +107,27 @@ def prepare_side_branches(
         主支参考面积 (cm²)
     prox_idx, dist_idx :
         近/远端参考下标
-    branch_frame_indices, branch_diameters_mm :
-        侧支开口帧与直径 (mm)；均为 None 则无侧支
+    branch_frame_indices, branch_diameters_cm :
+        侧支开口帧与直径 (cm)；均为 None 则无侧支
     apply_murray_scale :
-        True 时用近端/远端参考对侧支直径做统一 Murray 缩放
+        False（默认）：直接用输入直径算 f_i ∝ D_i^γ，改直径会改分流。
+        True：先做统一 Murray 缩放以闭合近/远端；总侧支份额由 A₀ 近/远端决定，
+        输入直径绝对值几乎不影响总分流（仅影响多侧支之间的相对分配）。
 
     Returns
     -------
     branches, distal_flow_fraction
     """
-    if branch_frame_indices is None or branch_diameters_mm is None:
+    if branch_frame_indices is None or branch_diameters_cm is None:
         return [], 1.0
 
     idxs = [int(i) for i in branch_frame_indices]
-    diams = [float(d) for d in branch_diameters_mm]
+    diams = [float(d) for d in branch_diameters_cm]
     if len(idxs) != len(diams):
-        raise ValueError("branch_frame_indices 与 branch_diameters_mm 长度须一致")
+        raise ValueError(
+            f"branch_frame_indices 与 branch_diameters_cm 长度须一致 "
+            f"({len(idxs)} vs {len(diams)})"
+        )
 
     n = len(area_ref_cm2)
     for i in idxs:
@@ -131,19 +141,29 @@ def prepare_side_branches(
         scaled = scale_branches_to_murray(parent, distal, diams, murray_exponent)
         if float(np.sum(scaled)) <= 0.0:
             scaled = np.asarray(diams, dtype=float)
+        else:
+            # 缩放后总侧支导纳固定，提示用户
+            import warnings
+
+            warnings.warn(
+                "apply_murray_scale=True：侧支直径已被统一缩放以闭合 Murray；"
+                "总侧支流量份额由近/远端参考面积决定，不随输入直径绝对值变化。"
+                "若要让 branch_diameters_cm 直接控制分流，请设 apply_murray_scale=False。",
+                stacklevel=2,
+            )
     else:
         scaled = np.asarray(diams, dtype=float)
 
     branches: List[SideBranch] = []
     for i, d in zip(idxs, scaled):
         d = float(d)
-        if d < min_diameter_mm:
+        if d < min_diameter_cm:
             continue
         branches.append(
             SideBranch(
                 frame_index=int(i),
-                diameter_mm=d,
-                area_mm2=float(np.pi * (d / 2.0) ** 2),
+                diameter_cm=d,
+                area_cm2=float(np.pi * (d / 2.0) ** 2),
                 source="manual+murray_scaled" if apply_murray_scale else "manual",
             )
         )
@@ -151,10 +171,9 @@ def prepare_side_branches(
     if not branches:
         return [], 1.0
 
-    # 按轴向排序，便于沿程累减流量
     branches.sort(key=lambda b: b.frame_index)
 
-    terminal_diams = [b.diameter_mm for b in branches] + [distal]
+    terminal_diams = [b.diameter_cm for b in branches] + [distal]
     fracs = murray_flow_fractions(terminal_diams, murray_exponent)
     for b, f in zip(branches, fracs[:-1]):
         b.flow_fraction = float(f)

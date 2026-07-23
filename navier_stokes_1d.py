@@ -368,8 +368,8 @@ class NavierStokes1D:
         n_nodes: int,
         parameters: BloodFlowParameters | None = None,
         branch_frame_indices: Optional[Sequence[int]] = None,
-        branch_diameters_mm: Optional[Sequence[float]] = None,
-        apply_murray_scale: bool = True,
+        branch_diameters_cm: Optional[Sequence[float]] = None,
+        apply_murray_scale: bool = False,
     ):
         if n_nodes < 3:
             raise ValueError("n_nodes 至少为 3")
@@ -422,7 +422,7 @@ class NavierStokes1D:
             self.prox_idx,
             self.dist_idx,
             branch_frame_indices,
-            branch_diameters_mm,
+            branch_diameters_cm,
             apply_murray_scale=apply_murray_scale,
         )
         self._branch_outflow = np.zeros(len(self.side_branches), dtype=float)
@@ -433,8 +433,8 @@ class NavierStokes1D:
             )
             for b in self.side_branches:
                 print(
-                    f"  frame={b.frame_index}, D={b.diameter_mm:.3f} mm, "
-                    f"f={b.flow_fraction:.3f}"
+                    f"  frame={b.frame_index}, D={b.diameter_cm:.4f} cm, "
+                    f"f={b.flow_fraction:.3f}, Q_b≈{b.flow_fraction * self.paras.mean_coronary_flow_ml_s():.4f} mL/s"
                 )
 
         # 主支远端 + 各侧支 Windkessel（阻力按 Murray 份额标定）
@@ -740,7 +740,7 @@ class NavierStokes1D:
         fig.tight_layout()
         plt.show()
 
-    def plot_results_1(self, show: bool = True, renderer: str | None = None):
+    def plot_results_1(self, show: bool = True, title: str = "", renderer: str | None = None):
         """
         与 plot_results 相同的四幅图，使用 Plotly 在浏览器中交互显示。
 
@@ -792,15 +792,14 @@ class NavierStokes1D:
         )
 
         ffr = self.ffr_ratio()
-        x_mm = xx * 10.0
         fig.add_trace(
             go.Scatter(
-                x=x_mm,
+                x=xx,
                 y=ffr,
                 mode="lines",
                 name="FFR (with branches)" if self.side_branches else "FFR",
                 line=dict(color="darkred", width=2),
-                hovertemplate="x=%{x:.1f} mm<br>FFR=%{y:.4f}<extra></extra>",
+                hovertemplate="x=%{x:.1f} cm<br>FFR=%{y:.4f}<extra></extra>",
             ),
             row=1,
             col=2,
@@ -812,14 +811,6 @@ class NavierStokes1D:
             row=1,
             col=2,
         )
-        for br in self.side_branches:
-            fig.add_vline(
-                x=float(self.x[br.frame_index] * 10.0),
-                line_dash="dash",
-                line_color="rgba(120,120,120,0.5)",
-                row=1,
-                col=2,
-            )
 
         fig.add_trace(
             go.Scatter(
@@ -874,8 +865,8 @@ class NavierStokes1D:
 
         fig.update_xaxes(title_text="t (s)", row=1, col=1)
         fig.update_yaxes(title_text="x (cm)", row=1, col=1)
-        fig.update_xaxes(title_text="Axial distance (mm)", row=1, col=2)
-        fig.update_yaxes(title_text="FFR", range=[0.8, 1.02], row=1, col=2)
+        fig.update_xaxes(title_text="Axial distance (cm)", row=1, col=2)
+        fig.update_yaxes(title_text="FFR", row=1, col=2)
         fig.update_xaxes(title_text="t (s)", row=2, col=1)
         fig.update_yaxes(title_text="Q (cm³/s)", row=2, col=1)
         fig.update_xaxes(title_text="x (cm)", row=2, col=2)
@@ -885,7 +876,7 @@ class NavierStokes1D:
         fig.update_layout(
             height=1000,
             width=1000,
-            title_text="Navier-Stokes 1D 结果",
+            title_text=f"Navier-Stokes 1D 结果 ({title})",
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             template="plotly_white",
@@ -901,33 +892,39 @@ class NavierStokes1D:
 
 def demo():
     from scipy.ndimage import gaussian_filter1d
+    import os
 
+    name = 'ZQJ_240217_172752'
+    dirname = f"D:/WPY/Projects/FFR_test/lumen_area/{name}"
     np.random.seed(2034)
     sigma_nodes = 4
     duration_s = 3.0
 
-    area_file = np.load("data/pred_masks20260721/area.npy")
+    # 原始 npy：面积为 mm²，直径为 mm，帧间距 0.3 mm → 读入后一律换成 cm / cm²
+    area_file = np.load(os.path.join(dirname, "area.npy"))
     area = area_file[::-1] / 100.0  # mm² → cm²
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area_smooth.shape[0]
-    length = 0.3 * nx / 10.0  # 帧间距 0.3 mm → cm
+    length = 0.02 * nx  
     print(nx, length)
 
-    # 侧支：与面积同向翻转后的开口与直径 (mm)
-    is_branch = np.load("data/pred_masks20260721/is_branch.npy")[::-1]
-    branch_d = np.load("data/pred_masks20260721/branch_diameter.npy")[::-1]
+    prox_idx, dist_idx = select_reference_indices(area_smooth)
+
+    is_branch = np.load(os.path.join(dirname, "is_branch.npy"))[::-1]
+    branch_d_cm = np.load(os.path.join(dirname, "branch_diameter.npy"))[::-1] / 10.0  # mm → cm
     branch_idx = np.where(is_branch > 0)[0]
-    # 相邻帧合并：取直径较大者
     merged_idx: list[int] = []
     merged_d: list[float] = []
     for i in branch_idx:
-        if merged_idx and i - merged_idx[-1] <= 1:
-            if float(branch_d[i]) > merged_d[-1]:
+        if i < prox_idx or i > dist_idx:
+            continue
+        if merged_idx and i - merged_idx[-1] <= 3:
+            if float(branch_d_cm[i]) > merged_d[-1]:
                 merged_idx[-1] = int(i)
-                merged_d[-1] = float(branch_d[i])
+                merged_d[-1] = float(branch_d_cm[i])
         else:
             merged_idx.append(int(i))
-            merged_d.append(float(branch_d[i]))
+            merged_d.append(float(branch_d_cm[i]))
 
     parameters = BloodFlowParameters()
     solver = NavierStokes1D(
@@ -936,11 +933,11 @@ def demo():
         nx,
         parameters,
         branch_frame_indices=merged_idx,
-        branch_diameters_mm=merged_d,
-        apply_murray_scale=True,
+        branch_diameters_cm=merged_d,  
+        apply_murray_scale=False,
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
-    solver.plot_results_1()
+    solver.plot_results_1(title=name)
 
     assert solver.history_time is not None
     assert solver.history_flow is not None
@@ -963,6 +960,5 @@ def demo():
 if __name__ == "__main__":
     ffr = demo()
     print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")
-    # 单调性粗检（允许数值噪声）
     dffr = np.diff(ffr)
     print(f"FFR non-increasing violations: {int(np.sum(dffr > 1e-3))}")

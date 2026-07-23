@@ -13,10 +13,10 @@ MMHG_TO_DYNE_PER_CM2: Final[float] = 1333.22
 DYNE_PER_CM2_TO_MMHG: Final[float] = 1.0 / MMHG_TO_DYNE_PER_CM2
 
 # 入口/出口 tube law 与 Windkessel 阻力标定用的参考管腔压 (mmHg)
-P_INLET_REF_MMHG: Final[float] = 90.0
+P_INLET_REF_MMHG: Final[float] = 70.0
 
 # 最小管腔面积占参考面积比例
-MINIMUM_AREA_RATIO = 0.1
+MINIMUM_AREA_RATIO = 0.8
 
 
 def rho_for_mmhg_pressure_coupling(rho_g_per_cm3: float) -> float:

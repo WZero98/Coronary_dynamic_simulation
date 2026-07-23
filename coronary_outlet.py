@@ -168,7 +168,7 @@ def windkessel3_outlet_pressure(
     r_proximal_mmhg_s_per_ml: float | None = None,
     r_distal_mmhg_s_per_ml: float | None = None,
     compliance_ml_per_mmhg: float = _DEFAULT_C_ML_PER_MMHG,
-    proximal_fraction: float = 0.12,
+    proximal_fraction: float = 0.2,
     p_wk_init_mmhg: float | None = None,
 ):
     """
@@ -498,8 +498,8 @@ def plot_coronary_outlet_pressure(
 
 
 if __name__ == "__main__":
-    hr, co, frac = 75.0, 5.0, 0.03
-    duration_s = 30
+    hr, co, frac = 75.0, 5.5, 0.03
+    duration_s = 15
     r_d = None
     # rp, rd 可根据提供的流量进行估算，也可以直接给出
     t = np.linspace(0.0, duration_s, int(800 * duration_s))
