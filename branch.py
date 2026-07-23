@@ -96,7 +96,7 @@ def prepare_side_branches(
     branch_diameters_cm: Optional[Sequence[float]] = None,
     *,
     murray_exponent: float = DEFAULT_MURRAY_EXPONENT,
-    apply_murray_scale: bool = True,
+    apply_murray_scale: bool = False,
     min_diameter_cm: float = MIN_BRANCH_DIAMETER_CM,
 ) -> tuple[List[SideBranch], float]:
     """构造侧支列表，并返回主支远端终端的 Murray 流量份额。

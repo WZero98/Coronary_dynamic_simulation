@@ -232,7 +232,7 @@ class BloodFlowParameters:
 
     # 出口 Windkesse模型 相关
     outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
-    outlet_r_distal_mmhg_s_per_ml: float | None = 20  # Rd 远端阻力系数
+    outlet_r_distal_mmhg_s_per_ml: float | None = 25  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
     outlet_proximal_fraction: float = 0.15  # 三元模型近端阻力比例
@@ -456,7 +456,7 @@ class NavierStokes1D:
             print(f"Detect {len(self.lesions)} stenoses.")
             for lesion in self.lesions:
                 mask = (self.x >= self.x[lesion.i0]) & (self.x <= self.x[lesion.i1])
-                b_scale = self.area_ref[self.prox_idx] / self.area_ref[lesion.mla_idx]
+                b_scale = self.area_ref[self.prox_idx] / self.area_ref[lesion.mla_idx] if self.area_ref[lesion.mla_idx] <= 0.03 else 1.0
                 self.beta[mask] *= b_scale
 
         # 近/远端参考段平整
@@ -820,6 +820,7 @@ class NavierStokes1D:
 
     def ffr_ratio(self, warmup_fraction: float = 0.5) -> np.ndarray:
         """沿程压力 FFR：时间平均 p(x) / p(prox)，期望单调非增。"""
+        from scipy.signal import medfilt
         if self.history_pressure is None:
             p_mean = self.pressure.copy()
         else:
@@ -830,6 +831,7 @@ class NavierStokes1D:
         if p0 <= 1e-9:
             return np.ones(self.nx)
         ffr = p_mean / p0
+        smoothed_ffr = medfilt(ffr, kernel_size=5)
         return np.clip(ffr, 0.0, 1.0)
     
     def plot_results(self):
@@ -915,7 +917,7 @@ class NavierStokes1D:
             rows=2,
             cols=2,
             subplot_titles=(
-                "A(t, x) [cm²]",
+                "A(0, x) [cm²]",
                 "FFR pullback (pressure)",
                 "x = 近端(blue) / 远端(red)",
                 f"t = {t_show:.3f} s",
@@ -926,13 +928,13 @@ class NavierStokes1D:
         )
 
         fig.add_trace(
-            go.Heatmap(
-                x=tt,
-                y=xx,
-                z=self.history_area.T,
-                colorscale="Viridis",
-                colorbar=dict(title="A [cm²]", len=0.45, y=0.78),
-                hovertemplate="t=%{x:.4f} s<br>x=%{y:.3f} cm<br>A=%{z:.4f} cm²<extra></extra>",
+            go.Scatter(
+                x=xx,
+                y=self.area_ref,
+                mode="lines",
+                name="Initial Areas",
+                line=dict(color="black", width=2),
+                hovertemplate="x=%{x:.1f} cm<br>area=%{y:.4f} cm²<extra></extra>",
             ),
             row=1,
             col=1,
@@ -1010,7 +1012,7 @@ class NavierStokes1D:
             secondary_y=True,
         )
 
-        fig.update_xaxes(title_text="t (s)", row=1, col=1)
+        fig.update_xaxes(title_text="A (cm²)", row=1, col=1)
         fig.update_yaxes(title_text="x (cm)", row=1, col=1)
         fig.update_xaxes(title_text="x (cm)", row=1, col=2)
         fig.update_yaxes(title_text="FFR", row=1, col=2)
@@ -1041,8 +1043,8 @@ def demo():
     from scipy.ndimage import gaussian_filter1d
     import os
 
-    name = 'ZQJ_240217_172752'
-    dirname = f"data/pred_masks20260721"
+    name = 'pullback'
+    dirname = f"D:/WPY/Projects/FFR_test/lumen_area/{name}"
     np.random.seed(2034)
     sigma_nodes = 4
     duration_s = 3.0
@@ -1052,7 +1054,7 @@ def demo():
     area = area_file[::-1] / 100.0  # mm² → cm²
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
     nx = area_smooth.shape[0]
-    length = 0.03 * nx  
+    length = 0.02 * nx  
     print(nx, length)
 
     prox_idx, dist_idx = select_reference_indices(area_smooth)
@@ -1081,7 +1083,7 @@ def demo():
         parameters,
         branch_frame_indices=merged_idx,
         branch_diameters_cm=merged_d,  
-        apply_murray_scale=True,
+        apply_murray_scale=False,
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results_1(title=name)
