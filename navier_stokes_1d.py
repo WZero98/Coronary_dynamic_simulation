@@ -43,7 +43,9 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 - A(x,0) = A₀(x)（经近/远端参考段平整；狭窄段自动放大 β）
 - Q(x,0) 按 Murray 份额沿程分流剖面
 - 主支远端 P_wk(0) = Q_mean·f_distal·R_d
-- p_ref 保持 BloodFlowParameters 给定值，不由出口 Windkessel 覆盖
+- 3wk（及默认）将 p_ref 对齐到出口稳态管腔压 P_wk+R_p·Q_mean·f_distal，
+  使 A=A₀ 时 tube law 与出口 Windkessel 压位一致
+- 侧支默认 apply_murray_scale=True（Murray 闭合）；并校验直径单位/是否大于主支
 
 主要输入
 --------
@@ -417,7 +419,8 @@ class NavierStokes1D:
         parameters: BloodFlowParameters | None = None,
         branch_frame_indices: Optional[Sequence[int]] = None,
         branch_diameters_cm: Optional[Sequence[float]] = None,
-        apply_murray_scale: bool = False,
+        apply_murray_scale: bool = True,
+        align_p_ref_to_outlet: bool = True,
     ):
         if n_nodes < 3:
             raise ValueError("n_nodes 至少为 3")
@@ -500,17 +503,28 @@ class NavierStokes1D:
 
         q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
         q_mean = self.paras.mean_coronary_flow_ml_s()
-        p_ref = float(self.paras.p_ref_mmhg)
+        q_distal_mean = q_mean * self.distal_flow_fraction
         self.outlet.reset(
-            p_wk=q_mean * self.distal_flow_fraction * self.outlet.r_d,
+            p_wk=q_distal_mean * self.outlet.r_d,
             q_drive=q0 * self.distal_flow_fraction,
         )
+        # 将 tube law 的 p_ref 对齐到出口稳态管腔压（均值流量），避免 A=A₀ 时
+        # 整段压位与 Windkessel 脱节（常见表现：入口压系统性低于出口）
+        p_ref_user = float(self.paras.p_ref_mmhg)
+        if align_p_ref_to_outlet:
+            p_anchor = float(self.outlet.lumen_pressure(q_distal_mean))
+            self.paras.p_ref_mmhg = p_anchor
+            print(
+                f"p_ref aligned to outlet steady lumen pressure: "
+                f"{p_ref_user:.2f} → {p_anchor:.2f} mmHg "
+                f"(outlet={self.paras.outlet_windkessel})"
+            )
+        p_ref = float(self.paras.p_ref_mmhg)
         # 侧支：按 P≈p_ref 时 Q_b≈Murray 份额初始化 P_wk，便于起步
         for br, wk in zip(self.side_branches, self.branch_outlets):
             q_share = q_mean * br.flow_fraction
             r_coup = wk.coupling_resistance()
             wk.reset(p_wk=p_ref - r_coup * q_share, q_drive=q_share)
-        # 注意：不再用 3wk 出口稳态压覆盖 p_ref_mmhg
 
         self.state[0] = self.area_ref.copy()
         self.state[1] = self._main_flow_profile(q0)
@@ -523,7 +537,7 @@ class NavierStokes1D:
             dtype=float,
         )
         print(
-            f"p_ref={self.paras.p_ref_mmhg:.2f} mmHg (fixed); "
+            f"p_ref={self.paras.p_ref_mmhg:.2f} mmHg; "
             f"outlet P_wk0={self.outlet.p_wk:.2f}, P_lumen0={self.outlet.p_lumen:.2f} mmHg"
         )
         if self.branch_outlets:
@@ -889,7 +903,13 @@ class NavierStokes1D:
         fig.tight_layout()
         plt.show()
 
-    def plot_results_1(self, show: bool = True, title: str = "", renderer: str | None = None):
+    def plot_results_1(
+        self,
+        show: bool = True,
+        title: str = "",
+        renderer: str | None = None,
+        save_path: str | None = None,
+    ):
         """
         与 plot_results 相同的四幅图，使用 Plotly 在浏览器中交互显示。
 
@@ -899,6 +919,8 @@ class NavierStokes1D:
             是否调用 fig.show() 打开浏览器
         renderer : str, optional
             传给 plotly fig.show(renderer=...)，如 "browser"
+        save_path : str, optional
+            保存路径；``.html`` 写交互页，其它后缀走 ``write_image``（需 kaleido）
         """
         if self.history_time is None:
             raise RuntimeError("请先调用 run()")
@@ -911,7 +933,7 @@ class NavierStokes1D:
 
         tt = self.history_time
         xx = self.x
-        t_show = float(tt[-100])
+        t_show = float(tt[max(-100, -len(tt))])
 
         fig = make_subplots(
             rows=2,
@@ -1033,6 +1055,16 @@ class NavierStokes1D:
         fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="rgba(0,0,0,0.08)")
         fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="rgba(0,0,0,0.08)")
 
+        if save_path is not None:
+            import os
+
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)) or ".", exist_ok=True)
+            if str(save_path).lower().endswith(".html"):
+                fig.write_html(save_path, include_plotlyjs="cdn")
+            else:
+                fig.write_image(save_path, scale=2)
+            print(f"saved figure: {save_path}")
+
         if show:
             show_kw = {"renderer": renderer} if renderer is not None else {}
             fig.show(**show_kw)
@@ -1082,8 +1114,8 @@ def demo():
         nx,
         parameters,
         branch_frame_indices=merged_idx,
-        branch_diameters_cm=merged_d,  
-        apply_murray_scale=False,
+        branch_diameters_cm=merged_d,
+        # 默认 apply_murray_scale=True、align_p_ref_to_outlet=True
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
     solver.plot_results_1(title=name)
