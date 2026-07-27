@@ -201,14 +201,54 @@ c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
 
 ### 4.2 时间：SSP-RK2
 
+在空间离散中，通过有限体积法，获得每一个单元 \(i\) 的离散守恒式方程形式：
+
+\[
+\frac{\mathrm{d}\bar{U}_i}{\mathrm{d}t}
++ \frac{1}{\Delta x}\bigl(F_{i+\frac{1}{2}} - F_{i-\frac{1}{2}}\bigr)
+= S
+\]
+
+即
+
+\[
+\frac{\mathrm{d}\bar{U}_i}{\mathrm{d}t}
+= -\frac{1}{\Delta x}\bigl(F_{i+\frac{1}{2}} - F_{i-\frac{1}{2}}\bigr) + S
+\]
+
+将右侧视为关于 \(U,\,t\) 的函数
+
+\[
+\mathcal{L}(t, U)
+= -\frac{1}{\Delta x}\bigl(F_{i+\frac{1}{2}} - F_{i-\frac{1}{2}}\bigr) + S
+\]
+
+Runge–Kutta 2 阶（SSP-RK2 / Heun）形式如下：
+
+\[
+\begin{cases}
+\bar{U}_i^{n+1}
+= \bar{U}_i^{n}
++ \Delta t\bigl(\tfrac{1}{2}k_1 + \tfrac{1}{2}k_2\bigr) \\[0.4em]
+k_1 = \mathcal{L}\bigl(t^{n},\; \bar{U}_i^{n}\bigr) \\[0.4em]
+k_2 = \mathcal{L}\bigl(t^{n+1},\; \bar{U}_i^{n} + \Delta t\,k_1\bigr)
+\end{cases}
+\]
+
+提供 \(t=0\) 时的初值 \(\bar{U}_i^{0}\) 进行迭代求解。
+
+实现上与上式等价的写法（见 `_ssp_rk2_step`）为：
+
 \[
 \begin{aligned}
-U^{(1)} &= \mathrm{BC}\bigl(U^n + \Delta t\,\mathcal{L}(U^n)\bigr) \\
-U^{n+1} &= \mathrm{BC}\left(\tfrac{1}{2}U^n + \tfrac{1}{2}\bigl(U^{(1)} + \Delta t\,\mathcal{L}(U^{(1)})\bigr),\ \text{advance outlet}\right)
+U^{(1)} &= \mathrm{BC}\bigl(U^{n} + \Delta t\,\mathcal{L}(U^{n})\bigr) \\
+U^{n+1} &= \mathrm{BC}\left(
+\tfrac{1}{2}U^{n} + \tfrac{1}{2}\bigl(U^{(1)} + \Delta t\,\mathcal{L}(U^{(1)})\bigr),\
+\text{advance outlet}\right)
 \end{aligned}
 \]
 
-- \(\mathcal{L}(U) = -\partial_x \hat{F} + S\)
+- \(\mathcal{L}(U) = -\partial_x \hat{F} + S\)（自治情形可略去显式 \(t\) 依赖）
 - **边界条件**在每个子步施加；Windkessel 状态仅在**完整步末**推进（`advance_outlet=True`）。
 
 ### 4.3 CFL 条件

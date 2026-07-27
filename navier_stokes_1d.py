@@ -638,21 +638,24 @@ class NavierStokes1D:
         return dudt
 
     def _apply_boundaries(
-        self, state: np.ndarray, advance_outlet: bool = False
+        self, state: np.ndarray, advance: bool = False
     ) -> np.ndarray:
         u = state.copy()
-        q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
+    
+        if not advance:
+            q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
+        else:
+            q_in = float(np.asarray(self.paras.inlet_flow(self.time + self._outlet_dt)).reshape(-1)[0])
         u[1, 0] = q_in
-
         # 入口面积：零梯度外推（压力由 tube law 从 A 得到）
         u[0, 0] = u[0, 1]
 
         # 侧支：Windkessel 压力驱动分流（与主支出口同节拍推进）
-        self._apply_side_branches(u, advance=advance_outlet)
+        self._apply_side_branches(u, advance=advance)
 
         # 主支远端出口：Windkessel → P → A
         q_lumen = float(u[1, -1])
-        if advance_outlet and self._outlet_dt > 0.0:
+        if advance and self._outlet_dt > 0.0:
             _, p_out = self.outlet.advance(self._outlet_dt, q_lumen)
         else:
             _, p_out = self.outlet.apply_substep(q_lumen)
@@ -682,15 +685,19 @@ class NavierStokes1D:
 
     def _ssp_rk2_step(self, dt: float) -> None:
         self._outlet_dt = dt
-        u0 = self._apply_boundaries(self.state)
-        k0 = self._spatial_operator(u0)
-        u1 = self._clip_state(u0 + dt * k0, self.area_ref)
-        u1 = self._apply_boundaries(u1)
-        k1 = self._spatial_operator(u1)
+        # 求k1
+        u_n = self._apply_boundaries(self.state)  # 使用控制方程更新通量前，先应用边界条件，避免边界不合理
+        k1 = self._spatial_operator(u_n)  # 更新0-L内所有物理通量估计
+
+        # 求k2
+        u_n1 = self._clip_state(u_n + dt * k1, self.area_ref)
+        u_n1 = self._apply_boundaries(u_n1, advance=True)  # 使用控制方程更新通量前，先应用边界条件，避免边界不合理
+        k2 = self._spatial_operator(u_n1)
+
+        self.state = u_n + dt * 0.5 * (k1 + k2)
         self.state = self._clip_state(
-            0.5 * u0 + 0.5 * (u1 + dt * k1), self.area_ref
+            self.state, self.area_ref
         )
-        self.state = self._apply_boundaries(self.state, advance_outlet=True)
         self._update_pressure()
 
     def run(
@@ -845,7 +852,6 @@ class NavierStokes1D:
         if p0 <= 1e-9:
             return np.ones(self.nx)
         ffr = p_mean / p0
-        smoothed_ffr = medfilt(ffr, kernel_size=5)
         return np.clip(ffr, 0.0, 1.0)
     
     def plot_results(self):
@@ -1075,7 +1081,7 @@ def demo():
     from scipy.ndimage import gaussian_filter1d
     import os
 
-    name = 'pullback'
+    name = 'MYF_231214_131708'
     dirname = f"D:/WPY/Projects/FFR_test/lumen_area/{name}"
     np.random.seed(2034)
     sigma_nodes = 4

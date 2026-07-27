@@ -18,7 +18,8 @@ class StenosisSegment:
 
 
 def select_reference_indices(
-    areas_mm2: np.ndarray
+    areas_mm2: np.ndarray,
+    frac: float = 0.15
 ) -> Tuple[int, int]:
     """选择近/远端参考帧。
 
@@ -31,7 +32,6 @@ def select_reference_indices(
     if n < 3:
         return 0, max(n - 1, 0)
 
-    frac = 0.15
     prox_end = max(int(np.ceil(frac * n)), 1)
     dist_start = min(int(np.floor((1.0 - frac) * n)), n - 1)
     if dist_start <= prox_end:
