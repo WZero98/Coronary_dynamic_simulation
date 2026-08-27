@@ -19,11 +19,11 @@ class StenosisSegment:
 
 def select_reference_indices(
     areas_mm2: np.ndarray,
-    frac: float = 0.15
+    frac: float = 0.25
 ) -> Tuple[int, int]:
     """选择近/远端参考帧。
 
-    - 近端：前 ``ref_end_fraction``（默认 15%）区段内面积最大帧；
+    - 近端：前 ``ref_end_fraction``（默认 25%）区段内面积最大帧；
     - 远端：后 ``ref_end_fraction`` 区段内面积最大、且面积 ≤ 近端参考的帧；
     - 保证 proximal_ref_idx < distal_ref_idx，且近端面积 ≥ 远端面积。
     """

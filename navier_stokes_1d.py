@@ -262,13 +262,6 @@ class BloodFlowParameters:
             ),
             dtype=float,
         )
-    
-    def inlet_pressure(self, t: float | np.ndarray) -> np.ndarray:
-        rd = 12
-        p_remain = 56
-        inlet_flow = self.inlet_flow(t)
-        inlet_p = inlet_flow * rd + p_remain
-        return inlet_p
 
     def resolve_outlet_resistances(self) -> tuple[float, float]:
         """远端/近端阻力 (mmHg·s/mL)，与 coronary_outlet 默认标定一致。"""
@@ -1081,8 +1074,8 @@ def demo():
     from scipy.ndimage import gaussian_filter1d
     import os
 
-    name = 'MYF_231214_131708'
-    dirname = f"D:/WPY/Projects/FFR_test/lumen_area/{name}"
+    name = 'case3'
+    dirname = f"D:/WPY/Projects/FFR_test/output/lumen_area/{name}"
     np.random.seed(2034)
     sigma_nodes = 4
     duration_s = 3.0
@@ -1091,14 +1084,20 @@ def demo():
     area_file = np.load(os.path.join(dirname, "area.npy"))
     area = area_file[::-1] / 100.0  # mm² → cm²
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
+    
+    is_branch = np.load(os.path.join(dirname, "is_branch.npy"))[::-1]
+    branch_d_cm = np.load(os.path.join(dirname, "branch_diameter.npy"))[::-1] / 10.0  # mm → cm
+
+    # 按参考点重新设置长度
+    # area_smooth = area_smooth[:200]
+    # is_branch = is_branch[:200]
+    # branch_d_cm = branch_d_cm[:200]
+
     nx = area_smooth.shape[0]
     length = 0.02 * nx  
     print(nx, length)
 
     prox_idx, dist_idx = select_reference_indices(area_smooth)
-
-    is_branch = np.load(os.path.join(dirname, "is_branch.npy"))[::-1]
-    branch_d_cm = np.load(os.path.join(dirname, "branch_diameter.npy"))[::-1] / 10.0  # mm → cm
     branch_idx = np.where(is_branch > 0)[0]
     merged_idx: list[int] = []
     merged_d: list[float] = []
