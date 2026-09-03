@@ -406,7 +406,7 @@ class NavierStokes1D:
 
     def __init__(
         self,
-        area: np.ndarray | list,
+        area_cm2: np.ndarray | list,
         vessel_length_cm: float,
         n_nodes: int,
         parameters: BloodFlowParameters | None = None,
@@ -424,7 +424,7 @@ class NavierStokes1D:
         self.x = np.linspace(0.0, self.length, self.nx)
         self.dx = self.length / (self.nx - 1)
 
-        self.area_ref = np.asarray(area, dtype=float)
+        self.area_ref = np.asarray(area_cm2, dtype=float)
         self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)
         self.state = np.zeros((2, self.nx))
         self.pressure = np.zeros(self.nx)
@@ -1143,8 +1143,66 @@ def demo():
     return ffr
 
 
+def example():
+    import joblib
+    from scipy.ndimage import gaussian_filter1d
+    import os
+    np.random.seed(2034)
+    mm_per_pixel = (9.7 / 756)
+    sigma_nodes = 4
+    duration_s = 3.0  # 模拟时长
+
+    name = '69'
+    dirname = f"D:/WPY/Projects/lumen_area/results/output_for_downstrem"
+    # 原始 npy：面积为 pixel²，直径为 pixel，读入后一律换成 cm / cm²
+    area_file = joblib.load(os.path.join(dirname, "areas.joblib"))
+    area = np.array(area_file)[::-1] * (mm_per_pixel**2) / 100.0  # mm² → cm²
+    area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
+
+    nx = area_smooth.shape[0]
+    length = 0.02 * nx  
+    print(nx, length)
+
+    # 分支信息
+    branch_groups = joblib.load(os.path.join(dirname, "branches.joblib"))
+    branch_d = np.array(joblib.load(os.path.join(dirname, "branch_diameters.joblib")))
+    branch_d = branch_d[::-1] * mm_per_pixel / 10.0  # mm → cm
+    branch_idx = [nx - idxs[0] for idxs in branch_groups][::-1]
+
+    parameters = BloodFlowParameters()
+    solver = NavierStokes1D(
+        area_smooth,
+        length,
+        nx,
+        parameters,
+        branch_frame_indices=branch_idx,
+        branch_diameters_cm=branch_d,
+        # 默认 apply_murray_scale=True、align_p_ref_to_outlet=True
+    )
+    solver.run(duration_s=duration_s, record_interval_steps=30)
+    solver.plot_results_1(title=name)
+
+    assert solver.history_time is not None
+    assert solver.history_flow is not None
+    assert solver.history_pressure is not None
+
+    q_in = np.mean(solver.history_flow[:, 0])
+    q_out = np.mean(solver.history_flow[:, -1])
+    q_side = (
+        float(np.mean(np.sum(solver.history_branch_flow, axis=1)))
+        if solver.history_branch_flow is not None and solver.history_branch_flow.size
+        else 0.0
+    )
+    print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, Q_side_sum={q_side:.3f}")
+    print(f"mass check: Q_in ≈ Q_out+Q_side → {q_in:.3f} vs {q_out + q_side:.3f}")
+
+    ffr = solver.ffr_ratio()
+    return ffr
+
+
 if __name__ == "__main__":
-    ffr = demo()
-    print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")
+    # ffr = demo()
+    ffr = example()
+    print(f"max ffr: {np.max(ffr)}/n min ffr: {np.min(ffr)}")
     dffr = np.diff(ffr)
     print(f"FFR non-increasing violations: {int(np.sum(dffr > 1e-3))}")
