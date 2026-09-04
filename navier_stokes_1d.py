@@ -66,7 +66,7 @@ import numpy as np
 from branch import prepare_side_branches
 from coronary_constants import MINIMUM_AREA_RATIO, P_INLET_REF_MMHG, rho_for_mmhg_pressure_coupling
 from coronary_inlet import coronary_inlet_flow
-from geometry import detect_stenoses, select_reference_indices
+from geometry import detect_stenoses, select_reference_indices, resample_axial_profile
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +460,26 @@ class NavierStokes1D:
         dist_mask = self.x >= self.x[self.dist_idx]
         self.area_ref[prox_mask] = self.area_ref[self.prox_idx]
         self.area_ref[dist_mask] = self.area_ref[self.dist_idx]
+
+        # 舍去近/远端参考段以外的侧支（只保留 prox_idx ≤ i ≤ dist_idx）
+        if branch_frame_indices is not None and branch_diameters_cm is not None:
+            kept_idx: list[int] = []
+            kept_d: list[float] = []
+            dropped = 0
+            for i, d in zip(branch_frame_indices, branch_diameters_cm):
+                ii = int(i)
+                if ii < self.prox_idx or ii > self.dist_idx:
+                    dropped += 1
+                    continue
+                kept_idx.append(ii)
+                kept_d.append(float(d))
+            if dropped:
+                print(
+                    f"Drop {dropped} side branch(es) outside reference "
+                    f"[{self.prox_idx}, {self.dist_idx}]; kept {len(kept_idx)}."
+                )
+            branch_frame_indices = kept_idx
+            branch_diameters_cm = kept_d
 
         # Murray 侧支：闭合直径 + 流量份额；远端主支终端份额 = distal_flow_fraction
         self.side_branches, self.distal_flow_fraction = prepare_side_branches(
@@ -1143,16 +1163,78 @@ def demo():
     return ffr
 
 
-def example():
+def roi_process(roi_idx, area, branch_idx, branch_d):
+    """按 ROI 下标裁剪面积与侧支。
+
+    Parameters
+    ----------
+    roi_idx :
+        ROI 在原始序列中的下标列表，例如 ``[0, 1, ..., 199]`` 或任意子集
+        （须为 ``area`` 的合法下标）。
+    area :
+        原始沿程截面积，形状 ``(nx,)``
+    branch_idx, branch_d :
+        原始网格上的侧支开口下标与直径；等长
+
+    Returns
+    -------
+    area_roi, branch_idx_roi, branch_d_roi
+        - ``area_roi``：按 ``roi_idx`` 顺序取出的面积
+        - 落在 ROI 内的侧支下标映射为 ROI 内局部下标（``enumerate(roi_idx)``）；
+          不在 ROI 内的侧支删除
+    """
+    roi = np.asarray(roi_idx, dtype=int).ravel()
+    area_arr = np.asarray(area, dtype=float).ravel()
+    nx = int(area_arr.shape[0])
+    if roi.size == 0:
+        raise ValueError("roi_idx 不能为空")
+    if np.any(roi < 0) or np.any(roi >= nx):
+        raise ValueError(f"roi_idx 须落在 [0, {nx})，当前范围 [{roi.min()}, {roi.max()}]")
+
+    area_roi = area_arr[roi].copy()
+    old_to_new = {int(old): int(new) for new, old in enumerate(roi)}
+
+    idxs = list(branch_idx) if branch_idx is not None else []
+    diams = list(branch_d) if branch_d is not None else []
+    if len(idxs) != len(diams):
+        raise ValueError(
+            f"branch_idx 与 branch_d 长度须一致 ({len(idxs)} vs {len(diams)})"
+        )
+
+    branch_idx_roi: list[int] = []
+    branch_d_roi: list[float] = []
+    dropped = 0
+    for i, d in zip(idxs, diams):
+        old_i = int(i)
+        if old_i in old_to_new:
+            branch_idx_roi.append(old_to_new[old_i])
+            branch_d_roi.append(float(d))
+        else:
+            dropped += 1
+
+    if dropped:
+        print(
+            f"roi_process: drop {dropped} branch(es) outside ROI; "
+            f"kept {len(branch_idx_roi)}, area nx {nx} → {len(area_roi)}"
+        )
+    return area_roi, branch_idx_roi, branch_d_roi
+
+
+
+def example(
+    target_nx: int | None = 100,
+    frame_spacing_cm: float = 0.02,
+    duration_s: float = 3.0,
+    sigma_nodes: float = 4,
+    name: str = 'Null',
+):
+    """下游 joblib 数据示例；``target_nx`` 控制轴向降采样（None=不降采样）。"""
     import joblib
     from scipy.ndimage import gaussian_filter1d
     import os
     np.random.seed(2034)
     mm_per_pixel = (9.7 / 756)
-    sigma_nodes = 4
-    duration_s = 3.0  # 模拟时长
 
-    name = '69'
     dirname = f"D:/WPY/Projects/lumen_area/results/output_for_downstrem"
     # 原始 npy：面积为 pixel²，直径为 pixel，读入后一律换成 cm / cm²
     area_file = joblib.load(os.path.join(dirname, "areas.joblib"))
@@ -1160,14 +1242,27 @@ def example():
     area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
 
     nx = area_smooth.shape[0]
-    length = 0.02 * nx  
-    print(nx, length)
+    print(f"raw nx={nx}")
 
-    # 分支信息
+    # 分支信息（与 area 同向：近端→远端）
     branch_groups = joblib.load(os.path.join(dirname, "branches.joblib"))
     branch_d = np.array(joblib.load(os.path.join(dirname, "branch_diameters.joblib")))
     branch_d = branch_d[::-1] * mm_per_pixel / 10.0  # mm → cm
     branch_idx = [nx - idxs[0] for idxs in branch_groups][::-1]
+
+    # 只选择目标区域
+    roi_idx = list(range(10, 240))
+    area_smooth, branch_idx, branch_d = roi_process(roi_idx, area_smooth, branch_idx, branch_d)
+
+    # 轴向重采样：降低 nx 以加速；物理长度保持 frame_spacing_cm * nx_raw
+    area_smooth, length, nx, branch_idx, branch_d = resample_axial_profile(
+        area_smooth,
+        target_nx=target_nx,
+        branch_frame_indices=branch_idx,
+        branch_diameters_cm=branch_d,
+        frame_spacing_cm=frame_spacing_cm,
+    )
+    print(nx, length, f"n_branch={len(branch_idx)}")
 
     parameters = BloodFlowParameters()
     solver = NavierStokes1D(
@@ -1180,7 +1275,7 @@ def example():
         # 默认 apply_murray_scale=True、align_p_ref_to_outlet=True
     )
     solver.run(duration_s=duration_s, record_interval_steps=30)
-    solver.plot_results_1(title=name)
+    solver.plot_results_1(title=f"{name}_nx{nx}")
 
     assert solver.history_time is not None
     assert solver.history_flow is not None
@@ -1202,7 +1297,8 @@ def example():
 
 if __name__ == "__main__":
     # ffr = demo()
-    ffr = example()
+    # target_nx=100 降采样；改为 None 可跑原始分辨率对比准确率
+    ffr = example(target_nx=200)
     print(f"max ffr: {np.max(ffr)}/n min ffr: {np.min(ffr)}")
     dffr = np.diff(ffr)
     print(f"FFR non-increasing violations: {int(np.sum(dffr > 1e-3))}")
