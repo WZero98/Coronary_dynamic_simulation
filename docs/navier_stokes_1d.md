@@ -632,7 +632,7 @@ from navier_stokes_1d import NavierStokes1D, BloodFlowParameters
 
 L, nx = 30.0, 151
 x = np.linspace(0.0, L, nx)
-# area 须与 nx 等长，单位 cm²（已在求解网格上，构造时不再插值）
+# area 长度即节点数 n_x，单位 cm²（已在求解网格上，构造时不再插值）
 area = np.pi * (0.40 - 0.08 * x / L) ** 2
 
 par = BloodFlowParameters(
@@ -642,7 +642,7 @@ par = BloodFlowParameters(
     cfl=0.8,
 )
 
-solver = NavierStokes1D(area, L, nx, par)
+solver = NavierStokes1D(area, L, par)
 A_hist, Q_hist, p_hist, t_hist = solver.run(duration_s=2.4, record_interval_steps=25)
 print("FFR ≈", solver.ffr_ratio())
 solver.plot_results()          # matplotlib
@@ -652,7 +652,7 @@ solver.plot_results()          # matplotlib
 ### 6.3 推荐工作流
 
 ```text
-准备 A₀(nx) → BloodFlowParameters → NavierStokes1D(area, L, nx, par) → run → 后处理 / plot_results[_1]
+准备 A₀ → BloodFlowParameters → NavierStokes1D(area, L, par) → run → 后处理 / plot_results[_1]
 ```
 
 ---
@@ -665,16 +665,15 @@ solver.plot_results()          # matplotlib
 
 ```python
 NavierStokes1D(
-    area,                 # A₀，shape (n_nodes,)，单位 cm²
+    area,                 # A₀，shape (n_x,)，单位 cm²；n_x = len(area)
     vessel_length_cm,     # L (cm)
-    n_nodes,              # 与 area 长度一致
     parameters=None,
 )
 ```
 
 | 要求 | 说明 |
 |------|------|
-| `area` | 一维数组，长度必须为 `n_nodes`；点 \(i\) 对应 \(x_i=i\cdot L/(n_x-1)\) |
+| `area` | 一维数组，长度 ≥ 3；点 \(i\) 对应 \(x_i=i\cdot L/(n_x-1)\)，其中 \(n_x=\mathrm{len}(area)\) |
 | 单位 | cm²（若原始数据为 mm²，需自行换算，如 `/100`） |
 | 插值 | **无**：请先在外部插值/平滑到求解网格 |
 
@@ -691,9 +690,9 @@ NavierStokes1D(
 ### 7.2 由半径构造面积
 
 ```python
-radius_cm = ...  # 沿程半径，长度 = n_nodes
+radius_cm = ...  # 沿程半径，长度即节点数
 area = np.pi * radius_cm**2
-solver = NavierStokes1D(area, L, nx, par)
+solver = NavierStokes1D(area, L, par)
 ```
 
 ### 7.3 自动狭窄检测（`geometry.py`）
@@ -780,9 +779,8 @@ Windkessel ODE 驱动流量固定为出口管腔流量 \(Q(L)\)，无额外配�
 
 ```python
 NavierStokes1D(
-    area: np.ndarray | list,          # A₀，长度 = n_nodes，单位 cm²
+    area: np.ndarray | list,          # A₀，单位 cm²；n_x = len(area)
     vessel_length_cm: float,
-    n_nodes: int,
     parameters: BloodFlowParameters | None = None,
 )
 ```
@@ -905,8 +903,8 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
 
 | 目标 | 建议 |
 |------|------|
-| 更高空间精度 | 增大 `n_nodes`（并同步加长 `area`）；略减小 `cfl` |
-| 加快计算 | 减小 `n_nodes` 或 `duration_s`；增大 `record_interval_steps` |
+| 更高空间精度 | 加长 `area`（提高分辨率）；略减小 `cfl` |
+| 加快计算 | 缩短 `area`（降采样）或减小 `duration_s`；增大 `record_interval_steps` |
 | 不稳定 / 振荡 | 减小 `cfl`；检查 \(\beta\) 是否过大；确认单位一致 |
 | 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s） |
 | 更重狭窄 | 几何 \(A_0\) 更窄；自动放大的狭窄段 \(\beta\) 已随 MLA 变小而增大；必要时加密网格 |
@@ -924,7 +922,7 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
 5. 初值为 \(A=A_0,\; Q=Q_{\mathrm{in}}(0)\)；`3wk` 下 `p_ref` 会与出口稳态对齐；脉动工况建议 ≥2 个心动周期再取统计量。
 6. \(A_0\) 须已在求解网格上，构造函数**不做**空间插值。
 
-扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像半径/面积在外部插值到 `n_nodes` 后传入构造；多支血管可在外层循环或多段拼接。
+扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像半径/面积在外部插值到目标网格后传入构造；多支血管可在外层循环或多段拼接。
 
 ---
 
@@ -949,7 +947,7 @@ A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等
 A：matplotlib：`MPLBACKEND=Agg` 后自行 `savefig`；Plotly：`plot_results_1(show=False)` 再 `fig.write_html(...)`。
 
 **Q：如何设置管腔面积？还有 `set_lumen_area_profile` 吗？**  
-A：**已删除**。请准备与 `n_nodes` 等长的 `area`（cm²），传入 `NavierStokes1D(area, L, nx, par)`。狭窄由 `geometry.detect_stenoses` 自动检测并放大 \(\beta\)。
+A：**已删除**。请准备沿程 `area`（cm²），传入 `NavierStokes1D(area, L, par)`；节点数由 `len(area)` 决定。狭窄由 `geometry.detect_stenoses` 自动检测并放大 \(\beta\)。
 
 **Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
 A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 用 \(Q_{\mathrm{mean}} R_d\) 标定；`3wk` 时还会改写 `p_ref` 以对齐出口管腔压。

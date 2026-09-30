@@ -49,7 +49,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 
 主要输入
 --------
-1. 与 n_nodes 等长的管腔参考截面积 A₀（cm²）及血管长度 L
+1. 管腔参考截面积 A₀（cm²，一维数组；节点数 n_x = len(A₀)）及血管长度 L
 2. BloodFlowParameters（物性、入口、出口 Windkessel）
 3. geometry.select_reference_indices / detect_stenoses（构造内自动调用）
 
@@ -394,12 +394,10 @@ class NavierStokes1D:
 
     Parameters
     ----------
-    area : ndarray
-        参考管腔截面积 (cm²)
+    area_cm2 : ndarray
+        参考管腔截面积 (cm²)；轴向节点数由 ``len(area_cm2)`` 决定（含 x=0 与 x=L）
     vessel_length_cm : float
         血管长度 L (cm)
-    n_nodes : int
-        轴向网格节点数（含 x=0 与 x=L）
     parameters : BloodFlowParameters, optional
         物性与边界参数
     """
@@ -408,23 +406,22 @@ class NavierStokes1D:
         self,
         area_cm2: np.ndarray | list,
         vessel_length_cm: float,
-        n_nodes: int,
         parameters: BloodFlowParameters | None = None,
         branch_frame_indices: Optional[Sequence[int]] = None,
         branch_diameters_cm: Optional[Sequence[float]] = None,
         apply_murray_scale: bool = True,
         align_p_ref_to_outlet: bool = True,
     ):
-        if n_nodes < 3:
-            raise ValueError("n_nodes 至少为 3")
+        self.area_ref = np.asarray(area_cm2, dtype=float).ravel()
+        self.nx = int(self.area_ref.shape[0])
+        if self.nx < 3:
+            raise ValueError(f"area 长度至少为 3，当前为 {self.nx}")
         self.length = float(vessel_length_cm)
-        self.nx = int(n_nodes)
         self.paras = parameters if parameters is not None else BloodFlowParameters()
 
         self.x = np.linspace(0.0, self.length, self.nx)
         self.dx = self.length / (self.nx - 1)
 
-        self.area_ref = np.asarray(area_cm2, dtype=float)
         self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)
         self.state = np.zeros((2, self.nx))
         self.pressure = np.zeros(self.nx)
@@ -439,10 +436,6 @@ class NavierStokes1D:
         self.history_branch_flow: np.ndarray | None = None
 
         self.area_ref = np.maximum(self.area_ref, 1e-8)
-        if self.area_ref.shape[0] != self.nx:
-            raise ValueError(
-                f"area 长度 ({self.area_ref.shape[0]}) 须等于 n_nodes ({self.nx})"
-            )
 
         # #######其它状态初值设置#######
         # 狭窄检测与 β 放大
@@ -1136,7 +1129,6 @@ def demo():
     solver = NavierStokes1D(
         area_smooth,
         length,
-        nx,
         parameters,
         branch_frame_indices=merged_idx,
         branch_diameters_cm=merged_d,
@@ -1235,7 +1227,7 @@ def example(
     np.random.seed(2034)
     mm_per_pixel = (9.7 / 756)
 
-    dirname = f"D:/WPY/Projects/lumen_area/results/output_for_downstrem"
+    dirname = f"./data/output_for_downstrem"
     # 原始 npy：面积为 pixel²，直径为 pixel，读入后一律换成 cm / cm²
     area_file = joblib.load(os.path.join(dirname, "areas.joblib"))
     area = np.array(area_file)[::-1] * (mm_per_pixel**2) / 100.0  # mm² → cm²
@@ -1251,7 +1243,7 @@ def example(
     branch_idx = [nx - idxs[0] for idxs in branch_groups][::-1]
 
     # 只选择目标区域
-    roi_idx = list(range(10, 240))
+    roi_idx = list(range(10, 230))
     area_smooth, branch_idx, branch_d = roi_process(roi_idx, area_smooth, branch_idx, branch_d)
 
     # 轴向重采样：降低 nx 以加速；物理长度保持 frame_spacing_cm * nx_raw
@@ -1268,7 +1260,6 @@ def example(
     solver = NavierStokes1D(
         area_smooth,
         length,
-        nx,
         parameters,
         branch_frame_indices=branch_idx,
         branch_diameters_cm=branch_d,
