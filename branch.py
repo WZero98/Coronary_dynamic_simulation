@@ -17,8 +17,6 @@ import numpy as np
 # Zhou / Kassab / Molloi：冠脉树常用 γ ≈ 7/3；经典 Murray 为 3
 DEFAULT_MURRAY_EXPONENT = 7.0 / 3.0
 MIN_BRANCH_DIAMETER_CM = 0.01  # 0.1 mm
-# 冠脉侧支直径若仍以 mm 误当作 cm 传入，量级通常 > 1 cm
-_SUSPECT_MM_AS_CM_THRESHOLD = 1.0
 
 
 @dataclass
@@ -91,53 +89,6 @@ def murray_flow_fractions(
     return w / s
 
 
-def validate_branch_diameters_cm(
-    diameters_cm: Sequence[float],
-    parent_diameter_cm: float,
-    *,
-    auto_mm_to_cm: bool = True,
-) -> np.ndarray:
-    """校验侧支直径单位（须为 cm），并警告大于主支的侧支。
-
-    - 若中位数 > 1 cm 而主支直径 < 1 cm，判定为误把 mm 当作 cm；
-      ``auto_mm_to_cm=True`` 时自动 /10 并告警。
-    - 任一（校正后）侧支直径 > 主支直径时发出告警（Murray 闭合前）。
-    """
-    d = np.asarray(diameters_cm, dtype=float).copy()
-    if d.size == 0:
-        return d
-
-    parent = float(parent_diameter_cm)
-    med = float(np.median(d))
-    if (
-        auto_mm_to_cm
-        and med > _SUSPECT_MM_AS_CM_THRESHOLD
-        and parent < _SUSPECT_MM_AS_CM_THRESHOLD
-    ):
-        warnings.warn(
-            f"侧支直径中位数 {med:.3f} 更像 mm 而非 cm（主支 D={parent:.3f} cm）；"
-            "已自动按 mm→cm 除以 10。请确认输入单位为 cm。",
-            stacklevel=3,
-        )
-        d = d / 10.0
-
-    oversized = [
-        (k, float(dk))
-        for k, dk in enumerate(d)
-        if float(dk) > parent + 1e-12
-    ]
-    if oversized:
-        detail = ", ".join(f"#{k}={dk:.4f} cm" for k, dk in oversized[:5])
-        more = "" if len(oversized) <= 5 else f" 等 {len(oversized)} 条"
-        warnings.warn(
-            f"有 {len(oversized)} 条侧支直径大于主支 D_prox={parent:.4f} cm "
-            f"({detail}{more})。将在 apply_murray_scale=True 时被 Murray 闭合缩放；"
-            "若关闭缩放，请检查分割结果或直径单位（须为 cm）。",
-            stacklevel=3,
-        )
-    return d
-
-
 def prepare_side_branches(
     area_ref_cm2: np.ndarray,
     prox_idx: int,
@@ -148,7 +99,6 @@ def prepare_side_branches(
     murray_exponent: float = DEFAULT_MURRAY_EXPONENT,
     apply_murray_scale: bool = True,
     min_diameter_cm: float = MIN_BRANCH_DIAMETER_CM,
-    auto_mm_to_cm: bool = True,
 ) -> tuple[List[SideBranch], float]:
     """构造侧支列表，并返回主支远端终端的 Murray 流量份额。
 
@@ -164,8 +114,6 @@ def prepare_side_branches(
         True（默认）：统一 Murray 缩放以闭合近/远端；总侧支份额由 A₀ 近/远端决定，
         输入直径绝对值几乎不影响总分流（仅影响多侧支之间的相对分配）。
         False：直接用输入直径算 f_i ∝ D_i^γ（过大侧支易导致过分流）。
-    auto_mm_to_cm :
-        若直径量级像 mm，自动换算为 cm。
 
     Returns
     -------
@@ -189,29 +137,19 @@ def prepare_side_branches(
 
     parent = diameter_from_area_cm2(area_ref_cm2[prox_idx])
     distal = diameter_from_area_cm2(area_ref_cm2[dist_idx])
-    diams = validate_branch_diameters_cm(
-        diams_raw, parent, auto_mm_to_cm=auto_mm_to_cm
-    )
+    diams = np.asarray(diams_raw, dtype=float)
 
     if apply_murray_scale:
         scaled = scale_branches_to_murray(parent, distal, diams, murray_exponent)
         if float(np.sum(scaled)) <= 0.0:
             warnings.warn(
                 "Murray 残差 ≤ 0（近端不大于远端+侧支），无法闭合缩放；"
-                "回退为校验后的原始直径。可检查近/远端参考面积或侧支直径。",
+                "回退为原始直径。可检查近/远端参考面积或侧支直径。",
                 stacklevel=2,
             )
-            scaled = np.asarray(diams, dtype=float)
-        else:
-            ratios = scaled[diams > 0] / diams[diams > 0]
-            alpha = float(np.mean(ratios)) if ratios.size else 1.0
-            print(
-                f"apply_murray_scale=True: branch diameters scaled by alpha={alpha:.4f} "
-                f"for Murray closure; total side-branch share from prox/dist A0 "
-                f"(D_prox={parent:.4f}, D_dist={distal:.4f} cm)."
-            )
+            scaled = diams
     else:
-        scaled = np.asarray(diams, dtype=float)
+        scaled = diams
 
     branches: List[SideBranch] = []
     for i, d in zip(idxs, scaled):

@@ -13,7 +13,7 @@ class StenosisSegment:
     mla_idx: int
     i0: int
     i1: int
-    area_mm2: float
+    area_cm2: float
 
 
 
@@ -164,7 +164,7 @@ def resample_axial_profile(
 
 
 def detect_stenoses(
-    areas_mm2: np.ndarray,
+    areas_cm2: np.ndarray,
     proximal_ref_idx: int,
     distal_ref_idx: int,
 ) -> List[StenosisSegment]:
@@ -176,7 +176,7 @@ def detect_stenoses(
        且不落在已记录狭窄段 [i0,i1] 内，则记为下一段狭窄；
     3. 重复直至达到上限或不再满足条件。
     """
-    a = np.asarray(areas_mm2, dtype=float)
+    a = np.asarray(areas_cm2, dtype=float)
     n = len(a)
     i_lo = int(min(proximal_ref_idx, distal_ref_idx))
     i_hi = int(max(proximal_ref_idx, distal_ref_idx))
@@ -220,7 +220,7 @@ def detect_stenoses(
                 mla_idx=mla_idx,
                 i0=i0,
                 i1=i1,
-                area_mm2=mla_area,
+                area_cm2=mla_area,
             )
         )
         # 屏蔽本段狭窄范围（含边界）
