@@ -39,29 +39,22 @@ def select_reference_indices(
 
     prox_region = np.arange(0, prox_end)
     prox_idx = int(prox_region[np.argmax(a[prox_region])])
-    a_prox = float(a[prox_idx])
 
     dist_region = np.arange(dist_start, n)
-    feasible = dist_region[a[dist_region] <= a_prox + 1e-9]
-    if len(feasible) == 0:
-        # 无满足面积约束的帧：在远端区取面积最小者，尽量贴近“近>远”
-        dist_idx = int(dist_region[np.argmin(a[dist_region])])
-    else:
-        dist_idx = int(feasible[np.argmax(a[feasible])])
+    dist_idx = int(dist_region[np.argmax(a[dist_region])])
 
-    if prox_idx >= dist_idx:
-        # 极端短序列：强制拉开
-        prox_idx = 0
-        dist_idx = n - 1
-
-    # 若仍出现远端面积更大，交换语义上不合理，改为远端区次优可行帧
+    # 若远端面积更大，改为远端区最大且 ≤ 近端参考的帧
     if a[dist_idx] > a[prox_idx] + 1e-9:
+        found = False
         ordered = sorted(dist_region, key=lambda i: -a[i])
         for i in ordered:
-            if a[i] <= a[prox_idx] + 1e-9 and i > prox_idx:
+            if a[i] <= a[prox_idx] + 1e-9:
                 dist_idx = int(i)
+                found = True
                 break
-
+        if not found:
+            print("The distal reference area is larger than the proximal reference area."
+            "Please check the input data.")
     return prox_idx, dist_idx
 
 
@@ -168,26 +161,34 @@ def detect_stenoses(
     proximal_ref_idx: int,
     distal_ref_idx: int,
 ) -> List[StenosisSegment]:
-    """在近远端参考之间检测最多 ``max_stenoses`` 段狭窄。
+    """在近远端参考之间检测最多 3 段狭窄。
 
     规则：
-    1. 取区间内全局最小面积为 MLA；
-    2. 若次小值 A 满足 (A - MLA) ≤ ``mla_relative_tol`` × MLA，
-       且不落在已记录狭窄段 [i0,i1] 内，则记为下一段狭窄；
-    3. 重复直至达到上限或不再满足条件。
+    1. 仅在开区间 (prox, dist) 内取全局最小面积为 MLA；
+    2. 该 MLA 必须严格小于两端参考面积，否则视为无狭窄（锥形/均匀管腔）；
+    3. 若次小值 A 满足 (A - MLA) ≤ 0.1 × MLA，且不落在已记录段 [i0, i1] 内，
+       则记为下一段狭窄；
+    4. 重复直至达到上限或不再满足条件。
     """
     a = np.asarray(areas_cm2, dtype=float)
     n = len(a)
-    i_lo = int(min(proximal_ref_idx, distal_ref_idx))
-    i_hi = int(max(proximal_ref_idx, distal_ref_idx))
+    i_lo = int(proximal_ref_idx)
+    i_hi = int(distal_ref_idx)
+    if not (0 <= i_lo < n and 0 <= i_hi < n):
+        raise ValueError(
+            f"参考下标越界：prox={i_lo}, dist={i_hi}, n={n}"
+        )
     if i_hi <= i_lo:
-        return []
+        raise ValueError(
+            "The distal reference index is smaller than the proximal reference index."
+        )
 
     half = max(int(0.05 * n), 5)
     max_n = 3
     tol = 0.1
+    a_ref = min(float(a[i_lo]), float(a[i_hi]))
 
-    # 工作副本：已占用区间置为 +inf，避免再次选中
+    # 只在 (i_lo, i_hi) 内搜索；已占用段置 +inf
     work = a.copy()
     work[: i_lo + 1] = np.inf
     work[i_hi:] = np.inf
@@ -199,21 +200,21 @@ def detect_stenoses(
         if not np.isfinite(work).any():
             break
         mla_idx = int(np.argmin(work))
-        mla_area = float(a[mla_idx])
-        if not np.isfinite(work[mla_idx]):
+        mla_area = float(work[mla_idx])
+        if not np.isfinite(mla_area):
             break
 
         if primary_mla_area is None:
-            primary_mla_area = mla_area
-        else:
-            # (A - MLA) / MLA ≤ tol  ⟺  A ≤ MLA * (1 + tol)
-            if mla_area - primary_mla_area > tol * primary_mla_area + 1e-12:
+            if mla_area >= a_ref - 1e-12:
                 break
+            primary_mla_area = mla_area
+        elif mla_area - primary_mla_area > tol * primary_mla_area + 1e-12:
+            break
 
         i0 = max(i_lo, mla_idx - half)
         i1 = min(i_hi, mla_idx + half)
         if i1 <= i0:
-            i1 = min(i_hi, i0 + 1)
+            break
 
         stenoses.append(
             StenosisSegment(
@@ -223,10 +224,26 @@ def detect_stenoses(
                 area_cm2=mla_area,
             )
         )
-        # 屏蔽本段狭窄范围（含边界）
         work[i0 : i1 + 1] = np.inf
 
     stenoses.sort(key=lambda s: s.mla_idx)
     return stenoses
 
 
+if __name__ == "__main__":
+    from scipy.ndimage import gaussian_filter1d
+    area = np.array([
+        0.08, 0.078, 0.079, 0.081, 0.082, 0.076, 0.077, 0.075, 0.074, 0.073,
+        0.072, 0.071, 0.070, 0.069, 0.068, 0.067, 0.066, 0.065, 0.064, 0.063,
+        0.062, 0.065, 0.070, 0.069, 0.068, 0.067, 0.066, 0.065, 0.064, 0.063,
+        0.061, 0.062, 0.070, 0.069, 0.068, 0.067, 0.066, 0.065, 0.064, 0.063,
+        0.042, 0.041, 0.040, 0.039, 0.038, 0.037, 0.036, 0.035, 0.034, 0.033,
+        0.032, 0.031, 0.030, 0.029, 0.028, 0.027, 0.026, 0.025, 0.024, 0.023,
+        0.041, 0.042, 0.041, 0.041, 0.0412, 0.0422, 0.043, 0.0431, 0.0431, 0.0433,
+        0.0434, 0.0435, 0.0436, 0.0437, 0.0438, 0.0439, 0.0440, 0.0441, 0.0442, 0.0443,
+        0.0444, 0.0445, 0.0446, 0.0447, 0.0448, 0.0449, 0.0450, 0.0451, 0.0452, 0.0453,
+        0.0454, 0.0455, 0.0456, 0.0457, 0.0458, 0.0459, 0.0460, 0.0461, 0.0462, 0.0463,
+    ])
+    smoothed_area = gaussian_filter1d(area, sigma=4)
+    prox_idx, dist_idx = select_reference_indices(smoothed_area)
+    stenoses = detect_stenoses(smoothed_area, prox_idx, dist_idx)
