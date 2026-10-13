@@ -102,6 +102,41 @@ def area_from_lumen_pressure_mmhg(
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
     return np.maximum(sqrt_a**2, MINIMUM_AREA_RATIO * a0)
 
+
+# ---------------------------------------------------------------------------
+# 数值工具
+# ---------------------------------------------------------------------------
+def integral_mean(y: np.ndarray | Sequence[float], x: np.ndarray | Sequence[float]) -> float:
+    """梯形法离散计算一维采样的积分均值。
+
+    .. math::
+        \\bar{y} = \\frac{1}{x_N - x_0}\\int_{x_0}^{x_N} y(x)\\,\\mathrm{d}x
+        \\approx \\frac{\\mathrm{trapz}(y, x)}{x[-1] - x[0]}
+
+    Parameters
+    ----------
+    y :
+        函数值采样，一维，长度 ≥ 2
+    x :
+        自变量采样点，一维，与 ``y`` 等长；通常单调
+
+    Returns
+    -------
+    float
+        积分均值
+    """
+    yy = np.asarray(y, dtype=float).ravel()
+    xx = np.asarray(x, dtype=float).ravel()
+    if yy.size != xx.size:
+        raise ValueError(f"y 与 x 长度须一致 ({yy.size} vs {xx.size})")
+    if yy.size < 2:
+        raise ValueError(f"采样点数至少为 2，当前 {yy.size}")
+    span = float(xx[-1] - xx[0])
+    if abs(span) <= 1e-15:
+        raise ValueError("x 首尾跨度过小，无法计算积分均值")
+    return float(np.trapezoid(yy, xx) / span)
+
+
 # ---------------------------------------------------------------------------
 # TVD / MUSCL / HLL
 # ---------------------------------------------------------------------------
@@ -234,7 +269,7 @@ class BloodFlowParameters:
 
     # 出口 Windkesse模型 相关
     outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
-    outlet_r_distal_mmhg_s_per_ml: float | None = 25  # Rd 远端阻力系数
+    outlet_r_distal_mmhg_s_per_ml: float | None = 24  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
     outlet_proximal_fraction: float = 0.15  # 三元模型近端阻力比例
@@ -514,6 +549,7 @@ class NavierStokes1D:
             p_wk=q_distal_mean * self.outlet.r_d,
             q_drive=q0 * self.distal_flow_fraction,
         )
+        
         # 将 tube law 的 p_ref 对齐到出口稳态管腔压（均值流量），避免 A=A₀ 时
         # 整段压位与 Windkessel 脱节（常见表现：入口压系统性低于出口）
         p_ref_user = float(self.paras.p_ref_mmhg)
@@ -847,16 +883,27 @@ class NavierStokes1D:
 
     def ffr_ratio(self, warmup_fraction: float = 0.5) -> np.ndarray:
         """沿程压力 FFR：时间平均 p(x) / p(prox)，期望单调非增。"""
-        from scipy.signal import medfilt
-        if self.history_pressure is None:
-            p_mean = self.pressure.copy()
+        n_step = len(self.history_time)
+        # 统计均值，压力沿程分布的均值计算FFR
+        # if self.history_pressure is None:
+        #     assert ValueError("请先调用 run()")
+        # else:
+        #     i0 = int(max(n_step * warmup_fraction, 0))
+        #     p_mean = np.mean(self.history_pressure[i0:], axis=0)
+        # p0 = float(p_mean[self.prox_idx])
+        # if p0 <= 1e-9:
+        #     return np.ones(self.nx)
+        # ffr = p_mean / p0
+
+        # 积分均值，流量沿程分布的均值计算FFR
+        if self.history_flow is None:
+            assert ValueError("请先调用 run()")
         else:
-            n = self.history_pressure.shape[0]
-            i0 = int(max(n * warmup_fraction, 0))
-            p_mean = np.mean(self.history_pressure[i0:], axis=0)
-        p0 = float(p_mean[self.prox_idx])
-        if p0 <= 1e-9:
-            return np.ones(self.nx)
+            i0 = int(max(n_step * warmup_fraction, 0))
+            p_mean = [integral_mean(self.history_pressure[i0:, i], self.history_time[i0:]) for i in range(self.nx)]
+            p_mean = np.asarray(p_mean, dtype=float).ravel()
+        # 近端参考流量
+        p0 = float(integral_mean(self.history_pressure[i0:, self.prox_idx], self.history_time[i0:]))
         ffr = p_mean / p0
         return np.clip(ffr, 0.0, 1.0)
     
@@ -1037,7 +1084,7 @@ class NavierStokes1D:
                 x=xx,
                 y=self.history_pressure[-100],
                 mode="lines",
-                name="Q",
+                name="P",
                 line=dict(color="green", width=1.5, dash="dash"),
                 hovertemplate="x=%{x:.3f} cm<br>P=%{y:.3f} mmHg<extra></extra>",
             ),
@@ -1046,8 +1093,8 @@ class NavierStokes1D:
             secondary_y=True,
         )
 
-        fig.update_xaxes(title_text="A (cm²)", row=1, col=1)
-        fig.update_yaxes(title_text="x (cm)", row=1, col=1)
+        fig.update_xaxes(title_text="x (cm)", row=1, col=1)
+        fig.update_yaxes(title_text="A (cm²)", row=1, col=1)
         fig.update_xaxes(title_text="x (cm)", row=1, col=2)
         fig.update_yaxes(title_text="FFR", row=1, col=2)
         fig.update_xaxes(title_text="t (s)", row=2, col=1)
@@ -1227,7 +1274,7 @@ def example(
     np.random.seed(2034)
     mm_per_pixel = (9.7 / 756)
 
-    dirname = f"./data/output_for_downstrem"
+    dirname = f"./data/stenoses_data"
     # 原始 npy：面积为 pixel²，直径为 pixel，读入后一律换成 cm / cm²
     area_file = joblib.load(os.path.join(dirname, "areas.joblib"))
     area = np.array(area_file)[::-1] * (mm_per_pixel**2) / 100.0  # mm² → cm²
@@ -1243,8 +1290,8 @@ def example(
     branch_idx = [nx - idxs[0] for idxs in branch_groups][::-1]
 
     # 只选择目标区域
-    roi_idx = list(range(10, 230))
-    area_smooth, branch_idx, branch_d = roi_process(roi_idx, area_smooth, branch_idx, branch_d)
+    # roi_idx = list(range(10, 230))
+    # area_smooth, branch_idx, branch_d = roi_process(roi_idx, area_smooth, branch_idx, branch_d)
 
     # 轴向重采样：降低 nx 以加速；物理长度保持 frame_spacing_cm * nx_raw
     area_smooth, length, nx, branch_idx, branch_d = resample_axial_profile(
