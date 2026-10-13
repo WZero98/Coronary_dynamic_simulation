@@ -389,8 +389,8 @@ if __name__ == "__main__":
     print()
     print("模板峰值指标:", template_peak_metrics())
     
-    heart_rate: float = 75.
-    cardiac_output: float = 5.5
+    heart_rate: float = 75. * 8/5
+    cardiac_output: float = 5 * 8/5  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为7L/min
     coronary_fraction: float = 0.03
     duration_s: float = 5
     min_flow_fraction = 0.25

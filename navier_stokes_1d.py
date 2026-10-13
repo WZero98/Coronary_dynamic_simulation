@@ -257,11 +257,11 @@ class BloodFlowParameters:
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 1000.0  # 默认β，越大表示管腔越硬（管壁刚度）
+    beta_mmhg_per_sqrt_cm: float = 1000.0 * 8/5  # 默认β，越大表示管腔越硬（管壁刚度）
 
     # 冠脉血流入口相关
-    heart_rate_bpm: float = 75.0  # 心率 (bpm)
-    cardiac_output_l_per_min: float = 9  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 最大充血状态时心输出量设为9L/min
+    heart_rate_bpm: float = 75.0 * 8/5  # 心率 (bpm)
+    cardiac_output_l_per_min: float = 8  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为8L/min
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
     inlet_min_flow_fraction: float = 0.25  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
@@ -269,10 +269,10 @@ class BloodFlowParameters:
 
     # 出口 Windkesse模型 相关
     outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
-    outlet_r_distal_mmhg_s_per_ml: float | None = 24  # Rd 远端阻力系数
+    outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
-    outlet_proximal_fraction: float = 0.15  # 三元模型近端阻力比例
+    outlet_proximal_fraction: float = 0.10  # 三元模型近端阻力比例
 
     def mean_coronary_flow_ml_s(self) -> float:
         """入口平均流量 (mL/s)。"""
@@ -464,11 +464,12 @@ class NavierStokes1D:
         self.time = 0.0
         self._outlet_dt = 0.0
 
-        self.history_time: np.ndarray | None = None
-        self.history_area: np.ndarray | None = None
-        self.history_flow: np.ndarray | None = None
-        self.history_pressure: np.ndarray | None = None
-        self.history_branch_flow: np.ndarray | None = None
+        # run() 写入；n_save ≈ 1 + floor(n_steps / record_interval_steps)
+        self.history_time: np.ndarray | None = None  # (n_save,) 保存时刻 (s)
+        self.history_area: np.ndarray | None = None  # (n_save, nx) 截面积 A (cm²)
+        self.history_flow: np.ndarray | None = None  # (n_save, nx) 流量 Q (mL/s)
+        self.history_pressure: np.ndarray | None = None  # (n_save, nx) 管腔压 p (mmHg)
+        self.history_branch_flow: np.ndarray | None = None  # (n_save, n_branch) 侧支出流 Q_b
 
         self.area_ref = np.maximum(self.area_ref, 1e-8)
 
@@ -1319,10 +1320,11 @@ def example(
     assert solver.history_flow is not None
     assert solver.history_pressure is not None
 
-    q_in = np.mean(solver.history_flow[:, 0])
-    q_out = np.mean(solver.history_flow[:, -1])
+    t_hist = solver.history_time
+    q_in = integral_mean(solver.history_flow[:, 0], t_hist)
+    q_out = integral_mean(solver.history_flow[:, -1], t_hist)
     q_side = (
-        float(np.mean(np.sum(solver.history_branch_flow, axis=1)))
+        float(integral_mean(np.sum(solver.history_branch_flow, axis=1), t_hist))
         if solver.history_branch_flow is not None and solver.history_branch_flow.size
         else 0.0
     )
@@ -1338,5 +1340,3 @@ if __name__ == "__main__":
     # target_nx=100 降采样；改为 None 可跑原始分辨率对比准确率
     ffr = example(target_nx=200)
     print(f"max ffr: {np.max(ffr)}/n min ffr: {np.min(ffr)}")
-    dffr = np.diff(ffr)
-    print(f"FFR non-increasing violations: {int(np.sum(dffr > 1e-3))}")
