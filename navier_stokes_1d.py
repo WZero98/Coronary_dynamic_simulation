@@ -261,7 +261,7 @@ class BloodFlowParameters:
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
-    cardiac_output_l_per_min: float = 5.5  # 心脏输出量 (L/min)
+    cardiac_output_l_per_min: float = 9  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 最大充血状态时心输出量设为9L/min
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
     inlet_min_flow_fraction: float = 0.25  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
@@ -549,7 +549,7 @@ class NavierStokes1D:
             p_wk=q_distal_mean * self.outlet.r_d,
             q_drive=q0 * self.distal_flow_fraction,
         )
-        
+
         # 将 tube law 的 p_ref 对齐到出口稳态管腔压（均值流量），避免 A=A₀ 时
         # 整段压位与 Windkessel 脱节（常见表现：入口压系统性低于出口）
         p_ref_user = float(self.paras.p_ref_mmhg)
