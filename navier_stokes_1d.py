@@ -44,7 +44,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 
 初值（构造 `NavierStokes1D` 时完成）
 ------------------------------------
-- A(x,0) = A₀(x)（经近/远端参考段平整；狭窄段自动放大 β）
+- A(x,0) = A₀(x)（经近/远端参考段平整；β 全段取常数，不随狭窄放大）
 - Q(x,0) 按 Murray 份额沿程分流剖面
 - 主支远端 P_wk(0) = Q_mean·f_distal·R_d
 - 3wk（及默认）将 p_ref 对齐到出口稳态管腔压 P_wk+R_p·Q_mean·f_distal，
@@ -266,10 +266,10 @@ class BloodFlowParameters:
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_cm: float = 1000.0 * 8/5  # 管壁刚度 β (mmHg/cm)，越大管腔越硬
+    beta_mmhg_per_cm: float = 3500.0  # 管壁刚度 β (mmHg/cm)，越大管腔越硬
 
     # 冠脉血流入口相关
-    heart_rate_bpm: float = 75.0 * 8/5  # 心率 (bpm)
+    heart_rate_bpm: float = 75.0  # 心率 (bpm)
     cardiac_output_l_per_min: float = 8  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为8L/min
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
     inlet_min_flow_fraction: float = 0.25  # 流量下限，即最小值占整个流量平均值的比例
@@ -471,7 +471,7 @@ class NavierStokes1D:
         self.x = np.linspace(0.0, self.length, self.nx)
         self.dx = self.length / (self.nx - 1)
 
-        self.beta = np.full(self.nx, self.paras.beta_mmhg_per_cm)
+        self.beta = np.full(self.nx, float(self.paras.beta_mmhg_per_cm), dtype=float)
         self.state = np.zeros((2, self.nx))
         self.pressure = np.zeros(self.nx)
 
@@ -488,15 +488,14 @@ class NavierStokes1D:
         self.area_ref = np.maximum(self.area_ref, 1e-8)
 
         # #######其它状态初值设置#######
-        # 狭窄检测与 β 放大
+        # 狭窄检测（仅用于诊断与绘图标注；不修改 β）
+        # 注：曾在此处按 A0(prox)/A0(MLA) 放大狭窄段 β，实测会使 tube law
+        # 对 A 的数值误差产生上百 mmHg 的放大（狭窄段出现负压/压力尖峰），
+        # 故已移除。β 保持 paras.beta_mmhg_per_cm 的常数值。
         self.prox_idx, self.dist_idx = select_reference_indices(self.area_ref)
         self.lesions = detect_stenoses(self.area_ref, self.prox_idx, self.dist_idx)
         if self.lesions:
             print(f"Detect {len(self.lesions)} stenoses.")
-            for lesion in self.lesions:
-                mask = (self.x >= self.x[lesion.i0]) & (self.x <= self.x[lesion.i1])
-                b_scale = self.area_ref[self.prox_idx] / self.area_ref[lesion.mla_idx] if self.area_ref[lesion.mla_idx] <= 0.03 else 1.0
-                self.beta[mask] *= b_scale
 
         # 近/远端参考段平整
         prox_mask = self.x <= self.x[self.prox_idx]

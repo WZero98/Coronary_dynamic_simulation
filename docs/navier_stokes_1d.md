@@ -690,13 +690,12 @@ NavierStokes1D(
 
 构造内还会：
 
-1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_cm`
+1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_cm`（全段一致，狭窄段**不**放大）
 2. `geometry.select_reference_indices` → 近/远端参考下标 `prox_idx`, `dist_idx`
-3. `geometry.detect_stenoses` → 自动检测狭窄段 `lesions`
-4. 狭窄段：\(\beta \mathrel{*}= A_0(\mathrm{prox})/A_0(\mathrm{MLA})\)
-5. 近端段 \(x\le x_{\mathrm{prox}}\)、远端段 \(x\ge x_{\mathrm{dist}}\) 的 \(A_0\) 分别平整为参考点面积
-6. `outlet.reset(...)`；若 `3wk` 则更新 `p_ref_mmhg` 与出口稳态管腔压对齐
-7. \(A=A_0\)，\(Q=Q_{\mathrm{in}}(0)\)，刷新 `pressure`
+3. `geometry.detect_stenoses` → 自动检测狭窄段 `lesions`（仅用于诊断/绘图标注，不改 β）
+4. 近端段 \(x\le x_{\mathrm{prox}}\)、远端段 \(x\ge x_{\mathrm{dist}}\) 的 \(A_0\) 分别平整为参考点面积
+5. `outlet.reset(...)`；若 `3wk` 则更新 `p_ref_mmhg` 与出口稳态管腔压对齐
+6. \(A=A_0\)，\(Q=Q_{\mathrm{in}}(0)\)，刷新 `pressure`
 
 ### 7.2 由半径构造面积
 
@@ -712,7 +711,12 @@ solver = NavierStokes1D(area, L, par)
 |------|-------------|
 | 近/远端参考 | `select_reference_indices`：前/后约 15% 区段内取面积最大（远端面积 ≤ 近端） |
 | 狭窄段 | `detect_stenoses`：近远端之间找 MLA，段宽约 \(\pm 5\%\,n_x\)，最多 3 段 |
-| \(\beta\) 放大 | 狭窄 mask 上 \(\beta \leftarrow \beta\cdot A_{0,\mathrm{prox}}/A_{0,\mathrm{MLA}}\) |
+| \(\beta\) | **不随狭窄放大**，全段取常数 `beta_mmhg_per_cm` |
+
+> 说明：早期版本曾在狭窄 mask 上做 \(\beta \leftarrow \beta\cdot A_{0,\mathrm{prox}}/A_{0,\mathrm{MLA}}\)。
+> 因 tube law \(p=P_{\mathrm{ref}}+\beta(\sqrt A-\sqrt{A_0})\) 中 \(\beta\) 被放大数倍后，
+> \(A\) 上不足 1% 的数值误差即被放大成上百 mmHg（狭窄段出现负压与压力尖峰），
+> 该操作已移除。狭窄的压降应由几何变窄（对流加速与局部损失）承担，而非管壁刚度。
 
 面积狭窄率（相对近端参考）：
 
@@ -918,7 +922,7 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 时间平均应接近
 | 加快计算 | 缩短 `area`（降采样）或减小 `duration_s`；增大 `record_interval_steps` |
 | 不稳定 / 振荡 | 减小 `cfl`；检查 \(\beta\) 是否过大；确认单位一致 |
 | 周期性稳态 | `duration_s` 取 2–4 个心动周期（HR=75 → \(T\approx 0.8\) s，建议 ≥1.6 s） |
-| 更重狭窄 | 几何 \(A_0\) 更窄；自动放大的狭窄段 \(\beta\) 已随 MLA 变小而增大；必要时加密网格 |
+| 更重狭窄 | 几何 \(A_0\) 更窄；狭窄压降由变窄断面承担；必要时加密网格 |
 
 计算量：每步 2 次空间算子（SSP-RK2），复杂度 \(O(n_x)\)。
 
@@ -958,7 +962,7 @@ A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等
 A：matplotlib：`MPLBACKEND=Agg` 后自行 `savefig`；Plotly：`plot_results_1(show=False)` 再 `fig.write_html(...)`。
 
 **Q：如何设置管腔面积？还有 `set_lumen_area_profile` 吗？**  
-A：**已删除**。请准备沿程 `area`（cm²），传入 `NavierStokes1D(area, L, par)`；节点数由 `len(area)` 决定。狭窄由 `geometry.detect_stenoses` 自动检测并放大 \(\beta\)。
+A：**已删除**。请准备沿程 `area`（cm²），传入 `NavierStokes1D(area, L, par)`；节点数由 `len(area)` 决定。狭窄由 `geometry.detect_stenoses` 自动检测（仅用于诊断与绘图标注，**不**修改 \(\beta\)）。
 
 **Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
 A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 用 \(Q_{\mathrm{mean}} R_d\) 标定；`3wk` 时还会改写 `p_ref` 以对齐出口管腔压。
