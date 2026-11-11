@@ -421,7 +421,8 @@ par = BloodFlowParameters(
     inlet_phase_offset_rad=0.0,
     inlet_fourier_coefficients=None,   # None → 使用 coronary_inlet 内置系数
 )
-solver = NavierStokes1D(length_cm, nx, par)
+# area：沿程 A₀ (cm²)，节点数由 len(area) 决定
+solver = NavierStokes1D(area, length_cm, par)
 Q_in = par.inlet_flow(t)              # 等价于 coronary_inlet_flow(..., coronary_fraction=0.03)
 ```
 
