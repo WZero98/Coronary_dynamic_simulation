@@ -10,16 +10,20 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 
     F₀ = Q
     F₁ = α·Q²/A                         （仅对流；不含 pA/ρ*）
-    S  = [0, −(A/ρ*)·∂p/∂x − 8πμ·Q/A]ᵀ
+    S  = [0, −(A/ρ*)·∂p/∂x − 8πν·Q/A]ᵀ
 
     等价于文献标准式：
-        ∂Q/∂t + ∂(α Q²/A)/∂x + (A/ρ*) ∂p/∂x = −8πμ Q/A
+        ∂Q/∂t + ∂(α Q²/A)/∂x + (A/ρ*) ∂p/∂x = −8πν Q/A
 
     注意：旧版曾写 F₁ = α Q²/A + p A/ρ* 且无 (p/ρ*)∂A/∂x 源项，
     与上式不等价，变截面处会产生虚假压力梯度（见 docs/navier_stokes_1d.md §3.1.1）。
 
     ρ* = ρ / (1333.22 g·cm⁻¹·s⁻² per mmHg)，在 BloodFlowParameters 中一次性标定；
     与逐点把 p 换成 dyne/cm² 再代入原式等价。
+
+    摩擦项中的 ν 为**运动粘度**（cm²/s），不是动力粘度：
+        由 (1/ρ)∂p/∂x = −8πμ_dyn Q/(ρ A²) 归一化得 (A/ρ)∂p/∂x = −8πν Q/A，ν = μ_dyn/ρ。
+        故 ν ≈ 3.5 cP / 1.06 g·cm⁻³ = 0.033 cm²/s（全血 37°C）。
 
 管壁弹性（tube law，mmHg）
 --------------------------
@@ -64,7 +68,12 @@ from typing import Literal, Optional, Sequence
 import numpy as np
 
 from branch import prepare_side_branches
-from coronary_constants import MINIMUM_AREA_RATIO, P_INLET_REF_MMHG, rho_for_mmhg_pressure_coupling
+from coronary_constants import (
+    DEFAULT_PROXIMAL_FRACTION,
+    MINIMUM_AREA_RATIO,
+    P_INLET_REF_MMHG,
+    rho_for_mmhg_pressure_coupling,
+)
 from coronary_inlet import coronary_inlet_flow
 from geometry import detect_stenoses, select_reference_indices, resample_axial_profile
 
@@ -251,13 +260,13 @@ class BloodFlowParameters:
     # 流体相关
     rho: float = 1.06  # 血液密度 (g/cm³)
     alpha: float = 1.1  # 动量修正系数（层流常取 1.1）
-    mu: float = 0.0035  # 血液粘度 (cm²/s)
+    mu: float = 0.033  # 血液运动粘度 ν (cm²/s) = 3.5 cP ÷ 1.06 g·cm⁻³；见 momentum_rho 说明
     cfl: float = 0.8  # 数值稳定性参数 CFL
     dt_max_s: float = 4e-4  # 时间步上限 (s)
 
     # 管壁相关 tube law
     p_ref_mmhg: float = P_INLET_REF_MMHG  # tube law 参考压 (mmHg)
-    beta_mmhg_per_sqrt_cm: float = 1000.0 * 8/5  # 默认β，越大表示管腔越硬（管壁刚度）
+    beta_mmhg_per_cm: float = 1000.0 * 8/5  # 管壁刚度 β (mmHg/cm)，越大管腔越硬
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0 * 8/5  # 心率 (bpm)
@@ -272,7 +281,7 @@ class BloodFlowParameters:
     outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
-    outlet_proximal_fraction: float = 0.10  # 三元模型近端阻力比例
+    outlet_proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION  # 三元模型近端阻力比例
 
     def mean_coronary_flow_ml_s(self) -> float:
         """入口平均流量 (mL/s)。"""
@@ -314,7 +323,12 @@ class BloodFlowParameters:
         return r_d, r_p
 
     def momentum_rho(self) -> float:
-        """与 mmHg 制管腔压配对的有效密度 ρ*（用于 (A/ρ*)∂p/∂x 与波速）。"""
+        """与 mmHg 制管腔压配对的有效密度 ρ*（用于 (A/ρ*)∂p/∂x 与波速）。
+
+        注意：这里的 ρ* 只服务于**压力项与波速**（因 p 用 mmHg 而非 dyne/cm²）。
+        **摩擦项不复用 ρ***：动量式 −8πμQ/A 要求 μ 为运动粘度 ν = μ_dyn/ρ，
+        归一化后已不含 ρ，见 :attr:`mu` 的取值说明。
+        """
         return rho_for_mmhg_pressure_coupling(self.rho)
 
 
@@ -457,7 +471,7 @@ class NavierStokes1D:
         self.x = np.linspace(0.0, self.length, self.nx)
         self.dx = self.length / (self.nx - 1)
 
-        self.beta = np.full(self.nx, self.paras.beta_mmhg_per_sqrt_cm)
+        self.beta = np.full(self.nx, self.paras.beta_mmhg_per_cm)
         self.state = np.zeros((2, self.nx))
         self.pressure = np.zeros(self.nx)
 
@@ -673,6 +687,8 @@ class NavierStokes1D:
             dpdx[:] = 0.0
         dudt[1] -= a * dpdx / rho_star
 
+        # 摩擦项 −8πνQ/A：ν 为运动粘度 (cm²/s)，故此处不再除以 rho
+        # （Poiseuille 形式 8πμ_dyn·Q/(ρ·A²)·A = 8πνQ/A 已把密度归一化掉）
         dudt[1] -= 8.0 * np.pi * self.paras.mu * state[1] / a
 
         # 侧支质量汇：主支连续方程 ∂A/∂t + ∂Q/∂x = −q_branch

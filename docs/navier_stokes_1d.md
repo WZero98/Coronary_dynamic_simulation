@@ -81,7 +81,7 @@ python navier_stokes_1d.py
 \qquad
 \partial_t Q + \partial_x\!\left(\alpha\frac{Q^2}{A}\right)
 + \frac{A}{\rho^*}\partial_x p
-= -\frac{8\pi\mu Q}{A}.
+= -\frac{8\pi\nu Q}{A}.
 \]
 
 写成有限体积所用的通量–源项形式：
@@ -97,7 +97,7 @@ F = \begin{bmatrix} Q \\ \alpha Q^2/A \end{bmatrix},
 \quad
 S = \begin{bmatrix}
   0 \\[4pt]
-  -\dfrac{A}{\rho^*}\partial_x p \;-\; \dfrac{8\pi\mu Q}{A}
+  -\dfrac{A}{\rho^*}\partial_x p \;-\; \dfrac{8\pi\nu Q}{A}
 \end{bmatrix}
 \]
 
@@ -107,9 +107,9 @@ S = \begin{bmatrix}
 | \(Q\) | 体积流量（沿 \(x\) 正向为出口方向） |
 | \(\rho^*\) | 与 mmHg 制管腔压配对的动量有效密度（`momentum_rho()`） |
 | \(\alpha\) | 动量修正系数（层流常取 1.1） |
-| \(\mu\) | 运动粘度 |
+| \(\nu\) | 运动粘度（cm²/s，= 动力粘度/\(\rho\)） |
 | 压力驱动 | **源项** \(-(A/\rho^*)\partial_x p\)，\(p\) 由 tube law 在单元中心计算 |
-| 摩擦项 | Poiseuille 型 \(-8\pi\mu Q/A\) |
+| 摩擦项 | Poiseuille 型 \(-8\pi\nu Q/A\) |
 
 实现上：HLL/物理通量只处理对流部分 \(F\)；\(\partial_x p\) 在单元中心用中心差分（端点用单侧差分）离散。当 \(A\equiv A_0\) 时 \(p\equiv P_{\mathrm{ref}}\)，故 \(\partial_x p=0\)，静止平衡无虚假轴向力。
 
@@ -182,9 +182,20 @@ c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
 | 体积流量 \(Q\) | cm³/s |
 | 入口模块输出 | mL/s（**1 mL = 1 cm³**，数值与 cm³/s 一致） |
 | 密度 \(\rho\) | g/cm³（默认 1.06） |
-| 粘度 \(\mu\) | cm²/s |
+| 运动粘度 \(\nu\) | cm²/s（默认 0.033 = 3.5 cP ÷ 1.06 g·cm⁻³） |
+| 管壁刚度 \(\beta\) | mmHg/cm（因 \(\beta(\sqrt A-\sqrt{A_0})\) 中 \(\sqrt A\) 单位为 cm） |
 | 压力 \(p\)（`pressure`、`history_pressure`） | mmHg；沿 \(x\) 各点的**管腔标量压**，非方向分量 |
 | 时间 \(t\) | s |
+
+> **为什么摩擦项用运动粘度而非动力粘度**
+>
+> 动量方程（动力粘度形式）为
+> \(\rho\bigl(\partial_t Q+\partial_x(\alpha Q^2/A)\bigr)+A\,\partial_x p=-8\pi\mu_{\rm dyn}Q/A\)。
+> 两边同除以 \(\rho\) 得
+> \(\partial_t Q+\partial_x(\alpha Q^2/A)+(A/\rho)\,\partial_x p=-8\pi\nu Q/A\)，
+> 其中 \(\nu=\mu_{\rm dyn}/\rho\) 为运动粘度。因本实现已把 \(p\) 用 mmHg 表达并折算进
+> \(\rho^*\)，摩擦项**不再含 \(\rho\)**，故 `mu` 必须填 \(\nu\)（cm²/s）。
+> 该式与 Poiseuille 解析解 \(\Delta p=8\mu_{\rm dyn}LQ/(\pi R^4)\) 数值上完全一致（比值 1.000000）。
 
 ---
 
@@ -679,7 +690,7 @@ NavierStokes1D(
 
 构造内还会：
 
-1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_sqrt_cm`
+1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_cm`
 2. `geometry.select_reference_indices` → 近/远端参考下标 `prox_idx`, `dist_idx`
 3. `geometry.detect_stenoses` → 自动检测狭窄段 `lesions`
 4. 狭窄段：\(\beta \mathrel{*}= A_0(\mathrm{prox})/A_0(\mathrm{MLA})\)
@@ -730,7 +741,7 @@ solver = NavierStokes1D(area, L, par)
 |------|------|------|
 | `rho` | 1.06 | 密度 (g/cm³) |
 | `alpha` | 1.1 | 动量修正系数 |
-| `mu` | 0.0035 | 运动粘度 (cm²/s) |
+| `mu` | 0.033 | 运动粘度 ν (cm²/s) = 3.5 cP ÷ 1.06 g·cm⁻³ |
 | `cfl` | 0.8 | CFL 数 |
 | `dt_max_s` | 4e-4 | 时间步上限 (s) |
 
@@ -739,7 +750,7 @@ solver = NavierStokes1D(area, L, par)
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `p_ref_mmhg` | 80 | tube law 参考压 (mmHg)；`3wk` 构造末可能被抬到出口稳态管腔压 |
-| `beta_mmhg_per_sqrt_cm` | 500 | 默认 \(\beta\) |
+| `beta_mmhg_per_cm` | 1600 | 管壁刚度 β (mmHg/cm)；因 \(\beta(\sqrt A-\sqrt{A_0})\) 中 \(\sqrt A\) 单位为 cm |
 
 ### 8.3 入口（→ `coronary_inlet_flow`）
 

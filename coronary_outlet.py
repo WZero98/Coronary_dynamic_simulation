@@ -20,7 +20,7 @@
 import numpy as np
 from typing import Literal
 
-from coronary_constants import P_INLET_REF_MMHG
+from coronary_constants import DEFAULT_PROXIMAL_FRACTION, P_INLET_REF_MMHG
 from coronary_inlet import coronary_inlet_flow
 
 # 默认微循环参数（以下划线开头的常量仅在本模块内使用）
@@ -38,9 +38,14 @@ def _default_distal_resistance(
 
 def _default_proximal_resistance(
     r_distal_mmhg_s_per_ml: float,
-    proximal_fraction: float = 0.12,
+    proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION,
 ) -> float:
-    """参数 R_p 近端阻力取远端阻力的一定比例（特征阻抗量级）。"""
+    """参数 R_p 近端阻力取远端阻力的一定比例（特征阻抗量级）。
+
+    比例取自 :data:`coronary_constants.DEFAULT_PROXIMAL_FRACTION`，
+    与 ``navier_stokes_1d.BloodFlowParameters.outlet_proximal_fraction`` 同源，
+    避免两处默认值漂移。
+    """
     return proximal_fraction * r_distal_mmhg_s_per_ml
 
 """
@@ -168,7 +173,7 @@ def windkessel3_outlet_pressure(
     r_proximal_mmhg_s_per_ml: float | None = None,
     r_distal_mmhg_s_per_ml: float | None = None,
     compliance_ml_per_mmhg: float = _DEFAULT_C_ML_PER_MMHG,
-    proximal_fraction: float = 0.2,
+    proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION,
     p_wk_init_mmhg: float | None = None,
 ):
     """
