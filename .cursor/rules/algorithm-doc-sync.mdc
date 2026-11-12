@@ -1,0 +1,68 @@
+---
+description: 修改算法模块时必须同步更新 docs/navier_stokes_1d.md
+globs: navier_stokes_1d.py,geometry.py,branch.py,coronary_inlet.py,coronary_outlet.py,coronary_constants.py
+alwaysApply: false
+---
+
+# 算法—文档同步规则
+
+`docs/navier_stokes_1d.md` 是本 1D 血流求解器的**规范说明**，不是附带参考。
+修改算法模块时，**必须同步更新文档**。二者不一致视为缺陷。
+
+## 强制要求
+
+改动以下任一类内容，**都要**在同一次修改中更新 `docs/navier_stokes_1d.md`：
+
+| 改动类型 | 需更新的文档位置 |
+|---|---|
+| 控制方程、源项、通量形式 | §3.1 |
+| tube law、`p_ref` 语义、`beta` 用法 | §3.2、§8.2 |
+| 空间离散（MUSCL/HLL/限制器/重构下限） | §4.1、§5.3 |
+| 时间离散（SSP-RK2、子步与边界施加顺序） | §4.2 |
+| CFL 判据、`dt_max_s` | §4.3 |
+| 入口/出口/侧支边界条件、驱动方式 | §5.1–5.2、§13.1 |
+| 初值、构造期初始化（含狭窄检测、参考段平整） | §5.5、§7.1、§7.3 |
+| 参数默认值（`BloodFlowParameters` 任一字段） | §8 |
+| 共享常量（`coronary_constants.py`） | §5.3、§8，及所有引用处 |
+| 新增/重命名/删除公开方法或模块级函数 | §9、§10 |
+| 诊断、后处理、FFR 定义 | §9.4、§9.6、§10.3 |
+| 已知限制、待办、未解决问题 | §13、§14 |
+
+## 反向核对（必做）
+
+文档里出现**具体数值**时，必须以源码为准逐项核对。历史漂移高发点：
+
+- `MINIMUM_AREA_RATIO`（当前 0.8）
+- `p_ref_mmhg` 默认值（当前 75.0，= `P_INLET_REF_MMHG`）
+- `beta_mmhg_per_cm` 默认值（当前 3500.0）
+- `cardiac_output_l_per_min` 默认值（当前 8）
+- `dt_max_s`（当前 4e-4）、`cfl`（当前 0.8）
+- 各类 `DEFAULT_*` 常量
+
+核对方法：
+
+```bash
+python -c "from navier_stokes_1d import BloodFlowParameters as B; print(B())"
+python -c "import coronary_constants as c; print(c.MINIMUM_AREA_RATIO, c.P_INLET_REF_MMHG)"
+```
+
+## 记录决策依据
+
+**移除或改写**算法行为时，不要只删文档，要在对应位置补一段说明「为什么改」，
+防止后续误改回去。示例见 §7.3 关于移除狭窄段 β 放大的说明。
+
+## 适用模块
+
+本规则的 `globs` 覆盖 `navier_stokes_1d.py`、`geometry.py`、`branch.py`、
+`coronary_inlet.py`、`coronary_outlet.py`、`coronary_constants.py`。
+
+改动上述任一文件后，若 `docs/navier_stokes_1d.md` 未随之更新，
+**应主动补文档，不要等用户要求**。
+
+## 检查清单
+
+- [ ] 新增/修改的每个算法要点，文档中有对应段落
+- [ ] 文档中的数值与源码实际默认值一致
+- [ ] 新增方法已列入 §9 的方法表
+- [ ] 行为变更记录了原因
+- [ ] 目录/交叉引用（`§x.y`）已同步

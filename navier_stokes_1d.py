@@ -811,6 +811,7 @@ class NavierStokes1D:
         t1 = time.perf_counter()
         print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
         self.print_pressure_diagnostics()
+        self.print_wellposedness_diagnostics()
         return (
             self.history_area,
             self.history_flow,
@@ -897,21 +898,149 @@ class NavierStokes1D:
             print("  !! warning: p_prox < p_dist (pressure inversion)")
         return stats
 
+    def wellposedness_diagnostics(
+        self, warmup_fraction: float = 0.5
+    ) -> dict[str, float]:
+        """适定性诊断：Froude 数、特征线方向、临界流量、面积钳位。
+
+        一维双曲系统 ``U = [A, Q]`` 的系数矩阵
+        ``[[0, 1], [c² − αu², 2αu]]`` 给出两条特征速度
+
+            λ± = α·u ± √(c² + α(α−1)·u²)
+
+        其中 ``u = Q/A``，``c = √(β√A/(2ρ*))``（见 :func:`_wave_speed`）。
+
+        判据
+        ----
+        - **亚临界** ``|u| < c``：``λ₋ < 0 < λ₊``，入口/出口各需 1 个边界条件
+        - **临界** ``|u| = c``（``Fr = 1``）：喉部状态
+        - **跨临界/壅塞** ``|u| > c``：``λ₋`` 亦变号，两个特征线同向，
+          出口的定压 Windkessel 条件与特征线方向矛盾，会反射虚假波
+
+        Parameters
+        ----------
+        warmup_fraction :
+            只用仿真后段 ``(1 − warmup_fraction)`` 的数据做统计（默认后 50%）
+
+        Returns
+        -------
+        dict
+            ``fr_max`` 全流域最大 Froude 数；``transcritical`` 是否跨临界；
+            ``n_choked`` ``λ₋ > 0`` 的节点数；``lam_minus_max`` 全流域
+            ``λ₋`` 最大值（应 < 0）；``n_clamp`` 面积钳位采样点数等。
+        """
+        rho_star = rho_for_mmhg_pressure_coupling(self.paras.rho)
+        alpha = float(self.paras.alpha)
+
+        has_hist = self.history_time is not None and self.history_area is not None
+        if has_hist:
+            n = self.history_area.shape[0]
+            i0 = int(max(n * warmup_fraction, 0))
+            a = np.asarray(self.history_area[i0:], dtype=float)
+            q = np.asarray(self.history_flow[i0:], dtype=float)
+        else:
+            a = np.asarray(self.state[0], dtype=float)[None, :]
+            q = np.asarray(self.state[1], dtype=float)[None, :]
+
+        u = q / np.maximum(a, 1e-12)
+        c = np.asarray(_wave_speed(a, self.beta, rho_star), dtype=float)
+        disc = np.sqrt(c**2 + alpha * (alpha - 1.0) * u**2)
+        lam_p = alpha * u + disc
+        lam_m = alpha * u - disc
+
+        fr = np.abs(u) / np.maximum(c, 1e-12)
+        fr_space = fr.max(axis=0)
+        fr_max = float(fr_space.max())
+        i_worst = int(np.argmax(fr_space))
+
+        # λ₋ > 0 ⇒ 该处两特征线同向，出口 BC 无法施加
+        lam_m_space = lam_m.max(axis=0)
+        bad = np.where(lam_m_space > 0.0)[0]
+        n_choked = int(bad.size)
+        lam_minus_max = float(lam_m_space.max())
+        lam_plus_min = float(lam_p.min())
+
+        # 临界流量 Q_crit = c·A（Fr = 1 对应的流量）
+        q_crit = float(np.mean(c * a, axis=0)[i_worst])
+        q_peak = float(q.max(axis=0)[i_worst])
+
+        # 面积钳位：A/A₀ 触到 MINIMUM_AREA_RATIO 的采样点数
+        ratio = a / self.area_ref
+        n_clamp = int((ratio <= MINIMUM_AREA_RATIO + 1e-6).sum())
+        clamp_frac = float((ratio <= MINIMUM_AREA_RATIO + 1e-6).mean())
+
+        return {
+            "fr_max": fr_max,
+            "fr_worst_idx": float(i_worst),
+            "fr_worst_x": float(self.x[i_worst]),
+            "transcritical": bool(fr_max > 1.0),
+            "n_choked": float(n_choked),
+            "choked_x_min": float(self.x[bad].min()) if n_choked else float("nan"),
+            "choked_x_max": float(self.x[bad].max()) if n_choked else float("nan"),
+            "lam_minus_max": lam_minus_max,
+            "lam_plus_min": lam_plus_min,
+            "well_posed": bool(n_choked == 0),
+            "q_crit_worst": q_crit,
+            "q_peak_worst": q_peak,
+            "c_worst": float(np.mean(c, axis=0)[i_worst]),
+            "u_worst": float(np.abs(u).max(axis=0)[i_worst]),
+            "n_clamp": float(n_clamp),
+            "clamp_fraction": clamp_frac,
+        }
+
+    def print_wellposedness_diagnostics(
+        self, warmup_fraction: float = 0.5
+    ) -> dict[str, float]:
+        """打印适定性诊断；返回 :meth:`wellposedness_diagnostics` 的字典。"""
+        s = self.wellposedness_diagnostics(warmup_fraction=warmup_fraction)
+        tag = "instant" if self.history_time is None else (
+            f"max over last {1.0 - warmup_fraction:.0%}T"
+        )
+        iw = int(s["fr_worst_idx"])
+        print(
+            f"[WP diag {tag}] Fr_max={s['fr_max']:.3f} @ idx={iw} "
+            f"(x={s['fr_worst_x']:.3f} cm, c={s['c_worst']:.1f}, "
+            f"u={s['u_worst']:.1f} cm/s) | "
+            f"lam- max={s['lam_minus_max']:+.1f}, lam+ min={s['lam_plus_min']:+.1f}"
+        )
+        if s["well_posed"]:
+            print(
+                f"  流态: 亚临界 ✓ (lambda- < 0 处处成立，每端 1 个 BC 适定)"
+            )
+        else:
+            print(
+                f"  !! 跨临界/壅塞: {int(s['n_choked'])} 个节点 lambda- > 0，"
+                f"x ∈ [{s['choked_x_min']:.3f}, {s['choked_x_max']:.3f}] cm；"
+                f"出口定压 BC 与特征线方向矛盾"
+            )
+            print(
+                f"     该处 Q_crit = c·A = {s['q_crit_worst']:.3f} mL/s，"
+                f"实际 Q_peak = {s['q_peak_worst']:.3f} mL/s "
+                f"(超 {s['q_peak_worst'] / max(s['q_crit_worst'], 1e-12):.2f} 倍)"
+            )
+        if s["n_clamp"] > 0:
+            print(
+                f"  !! 面积钳位: {int(s['n_clamp'])} 个采样点触及 "
+                f"A/A0 = {MINIMUM_AREA_RATIO:.2f} 下限 ({s['clamp_fraction']:.1%})；"
+                f"tube law 在该处已非线性削平"
+            )
+        return s
+
     def ffr_ratio(self, warmup_fraction: float = 0.5) -> np.ndarray:
         """沿程压力 FFR：时间平均 p(x) / p(prox)，期望单调非增。"""
         n_step = len(self.history_time)
-        # 统计均值，压力沿程分布的均值计算FFR
-        # if self.history_pressure is None:
+        # 流量FFR
+        # if self.history_flow is None:
         #     assert ValueError("请先调用 run()")
         # else:
         #     i0 = int(max(n_step * warmup_fraction, 0))
-        #     p_mean = np.mean(self.history_pressure[i0:], axis=0)
-        # p0 = float(p_mean[self.prox_idx])
-        # if p0 <= 1e-9:
-        #     return np.ones(self.nx)
+        #     p_mean = [integral_mean(self.history_flow[i0:, i], self.history_time[i0:]) for i in range(self.nx)]
+        #     p_mean = np.asarray(p_mean, dtype=float).ravel()
+        # # 近端参考流量
+        # p0 = float(integral_mean(self.history_flow[i0:, self.prox_idx], self.history_time[i0:]))
         # ffr = p_mean / p0
 
-        # 积分均值，流量沿程分布的均值计算FFR
+        # 积分均值，压力沿程分布的均值计算FFR
         if self.history_flow is None:
             assert ValueError("请先调用 run()")
         else:
