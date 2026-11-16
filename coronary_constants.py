@@ -20,7 +20,7 @@ MINIMUM_AREA_RATIO = 0.8
 
 # 三元 Windkessel 近端阻力比例 R_p = fraction · R_d（未显式指定 R_p 时生效）
 # 唯一定义于此，供 coronary_outlet 与 navier_stokes_1d 共用，避免多处默认值漂移
-DEFAULT_PROXIMAL_FRACTION: Final[float] = 0.12
+DEFAULT_PROXIMAL_FRACTION: Final[float] = 0.10
 
 
 def rho_for_mmhg_pressure_coupling(rho_g_per_cm3: float) -> float:

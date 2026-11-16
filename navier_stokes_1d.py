@@ -36,18 +36,19 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 
 边界条件
 --------
-- 入口：coronary_inlet.coronary_inlet_flow 提供生理脉动入口流量 Q_in(t)（mL/s ≡ cm³/s）
-- 侧支：各开口接 0D Windkessel；由主支开口管腔压 P_ostium 反解
-        Q_b=(P_ostium−P_wk)/R_coup（3wk 用 R_p，2wk 用 R_d），
+- 入口：给定 Q_in(t)；面积由出射 Riemann 不变量 W− = u − 4c 反解（亚临界）
+- 侧支：各开口接 0D 三元 Windkessel（RCR）；由主支开口管腔压 P_ostium 反解
+        Q_b=(P_ostium−P_wk)/R_p，
         连续方程质量汇 −Q_b/Δx；Murray 份额仅用于标定各支 R、C（flow_share）
-- 出口：主支远端 Windkessel；C·dP_wk/dt = Q(L) − P_wk/R_d，再反解 A(L)
+- 出口：Windkessel 给定管腔压并反解 A(L)；流量由出射不变量 W+ = u + 4c 反解
+        （亚临界）。C·dP_wk/dt = Q(L) − P_wk/R_d
 
 初值（构造 `NavierStokes1D` 时完成）
 ------------------------------------
 - A(x,0) = A₀(x)（经近/远端参考段平整；β 全段取常数，不随狭窄放大）
 - Q(x,0) 按 Murray 份额沿程分流剖面
 - 主支远端 P_wk(0) = Q_mean·f_distal·R_d
-- 3wk（及默认）将 p_ref 对齐到出口稳态管腔压 P_wk+R_p·Q_mean·f_distal，
+- 3wk（默认且唯一）将 p_ref 对齐到出口稳态管腔压 P_wk+R_p·Q_mean·f_distal，
   使 A=A₀ 时 tube law 与出口 Windkessel 压位一致
 - 侧支默认 apply_murray_scale=True（Murray 闭合）；并校验直径单位/是否大于主支
 
@@ -63,7 +64,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 """
 import time
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -189,6 +190,165 @@ def _wave_speed(
     return np.sqrt(b * np.sqrt(a) / (2.0 * rho_mmhg))
 
 
+def _c_prefactor(beta: float, rho_mmhg: float) -> float:
+    """c = γ A^{1/4}，γ = √(β / (2ρ*))。"""
+    return float(np.sqrt(float(beta) / (2.0 * float(rho_mmhg))))
+
+
+def _characteristic_speeds(
+    area: float,
+    flow: float,
+    beta: float,
+    rho_mmhg: float,
+    alpha: float,
+) -> tuple[float, float]:
+    """返回 (λ+, λ−)。与适定性诊断同一公式，含动量修正 α。"""
+    a = max(float(area), 1e-12)
+    u = float(flow) / a
+    c = float(_wave_speed(a, float(beta), rho_mmhg))
+    disc = float(np.sqrt(c * c + alpha * (alpha - 1.0) * u * u))
+    return alpha * u + disc, alpha * u - disc
+
+
+def _riemann_invariants(
+    area: float,
+    flow: float,
+    beta: float,
+    rho_mmhg: float,
+) -> tuple[float, float]:
+    """tube law 的 Riemann 不变量 W± = u ± 4c。
+
+    c = √(β √A / (2ρ*))，故 ∫(c/A) dA = 4c。这是 α = 1 时的标准不变量，
+    不是浅水方程的 u ± 2c。通量里仍使用参数 α；α 接近 1 时边界相容用 4c。
+    """
+    a = max(float(area), 1e-12)
+    u = float(flow) / a
+    c = _c_prefactor(beta, rho_mmhg) * a**0.25
+    return u + 4.0 * c, u - 4.0 * c
+
+
+def area_from_flow_and_w_minus(
+    flow: float,
+    w_minus: float,
+    beta: float,
+    rho_mmhg: float,
+    area_ref: float,
+    area_guess: float,
+) -> float:
+    """由入口流量与出射不变量反解面积：Q/A − 4c(A) = W−。
+
+    Q > 0 时左端对 A 严格递减，正根唯一，用二分。根低于面积下限时返回下限
+    （此时不变量无法精确满足，与 tube law 钳位一致）。
+    """
+    gamma = _c_prefactor(beta, rho_mmhg)
+    a_min = MINIMUM_AREA_RATIO * float(area_ref)
+    q = float(flow)
+    w = float(w_minus)
+
+    def residual(area: float) -> float:
+        aa = max(float(area), 1e-16)
+        return q / aa - 4.0 * gamma * aa**0.25 - w
+
+    if q > 0.0:
+        lo = 1e-14
+        hi = max(float(area_guess), a_min, 1e-8)
+        g_hi = residual(hi)
+        for _ in range(60):
+            if g_hi <= 0.0:
+                break
+            hi *= 2.0
+            g_hi = residual(hi)
+        else:
+            return max(float(area_guess), a_min)
+        for _ in range(70):
+            mid = 0.5 * (lo + hi)
+            if residual(mid) > 0.0:
+                lo = mid
+            else:
+                hi = mid
+        return max(0.5 * (lo + hi), a_min)
+
+    if abs(q) <= 1e-14 and w < 0.0 and gamma > 0.0:
+        z = -w / (4.0 * gamma)
+        return max(z**4, a_min)
+    return max(float(area_guess), a_min)
+
+
+def _outlet_flow_from_w_plus(
+    w_plus: float,
+    p_wk: float,
+    r_p: float,
+    r_d: float,
+    compliance: float,
+    dt: float,
+    area_ref: float,
+    beta: float,
+    p_ref: float,
+    rho_mmhg: float,
+    q_guess: float,
+) -> float | None:
+    """出口：给定出射不变量 W+，求与 RCR 管腔压相容的 Q。
+
+    冻结步（``dt==0``）：P = P_wk + R_p Q。
+    推进步（``dt>0``）：P_wk 按与 ``OutletWindkesselState.advance`` 相同的
+    显式欧拉用该 Q 预测，P = P_wk_new + R_p Q。
+    A 由 tube law 反解，约束为 Q = A (W+ − 4c(A))。
+    不收敛时返回 None，调用方退回「保留 PDE 流量、只定 A」。
+    """
+    gamma = _c_prefactor(beta, rho_mmhg)
+    a0 = float(area_ref)
+    beta_f = float(beta)
+    p_ref_f = float(p_ref)
+    r_d_f = max(float(r_d), 1e-9)
+    c_wk = max(float(compliance), 1e-9)
+    dt_f = max(float(dt), 0.0)
+    p_wk_f = float(p_wk)
+    r_p_f = float(r_p)
+
+    def p_lumen(q: float) -> float:
+        p_node = p_wk_f
+        if dt_f > 0.0:
+            p_node = p_node + (dt_f / c_wk) * (q - p_node / r_d_f)
+        return p_node + r_p_f * q
+
+    def q_compatible(q: float) -> float:
+        a = float(
+            np.asarray(
+                area_from_lumen_pressure_mmhg(p_lumen(q), a0, beta_f, p_ref_f)
+            ).reshape(-1)[0]
+        )
+        c = gamma * max(a, 1e-12) ** 0.25
+        return a * (float(w_plus) - 4.0 * c)
+
+    q = float(q_guess)
+    for _ in range(16):
+        r = q - q_compatible(q)
+        scale = max(1.0, abs(q))
+        if abs(r) <= 1e-8 * scale:
+            return q
+        dq = 1e-6 * scale
+        slope = (q + dq - q_compatible(q + dq) - r) / dq
+        if not np.isfinite(slope) or abs(slope) < 1e-14:
+            return None
+        step = r / slope
+        accepted = False
+        for _backtrack in range(8):
+            q_new = q - step
+            if np.isfinite(q_new) and abs(q_new) < 1.0e6:
+                r_new = q_new - q_compatible(q_new)
+                if abs(r_new) < abs(r):
+                    q = q_new
+                    accepted = True
+                    break
+            step *= 0.5
+        if not accepted:
+            return None
+    r_end = q - q_compatible(q)
+    if abs(r_end) <= 1e-6 * max(1.0, abs(q)):
+        return q
+    return None
+
+
 def _flux_vector(
     area: np.ndarray,
     flow: np.ndarray,
@@ -270,18 +430,17 @@ class BloodFlowParameters:
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
-    cardiac_output_l_per_min: float = 8  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为8L/min
+    cardiac_output_l_per_min: float = 5  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为8L/min
     coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
     inlet_min_flow_fraction: float = 0.25  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
     inlet_fourier_coefficients: Sequence[tuple[int, float, float]] | None = None  # 自定义谐波（傅里叶变换的系数）；None 用模块内置默认系数
 
-    # 出口 Windkesse模型 相关
-    outlet_windkessel: Literal["2wk", "3wk"] = "3wk"
+    # 出口 Windkessel 模型相关（三元 RCR；二元 RC 已移除，见 docs §5.2）
     outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
     outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
-    outlet_proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION  # 三元模型近端阻力比例
+    outlet_proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION  # 近端阻力比例
 
     def mean_coronary_flow_ml_s(self) -> float:
         """入口平均流量 (mL/s)。"""
@@ -334,10 +493,9 @@ class BloodFlowParameters:
 
 class OutletWindkesselState:
     """
-    与 coronary_outlet 中 Windkessel ODE 一致的出口/侧支状态机。
+    与 coronary_outlet 中三元 Windkessel（RCR）ODE 一致的出口/侧支状态机。
 
-    二元：P_wk 即管腔压。
-    三元：P_out = P_wk + R_p·Q_drive。
+    P_out = P_wk + R_p·Q_drive，P_wk 为微循环顺应性节点压。
 
     flow_share : 该终端占入口平均流量的 Murray 份额；阻力按 1/share 放大，
     顺应性按 share 缩小，使并联终端在均值上与单出口标定一致。
@@ -348,12 +506,11 @@ class OutletWindkesselState:
       （``apply_substep`` / ``advance``）
     - 侧支开口：由主支开口管腔压 P_ostium 驱动，反解分流量 Q_b
       （``apply_substep_from_pressure`` / ``advance_from_pressure``）
-      从而使狭窄抬高近端压时，近端侧支自动多分流量。
+    从而使狭窄抬高近端压时，近端侧支自动多分流量。
     """
 
     def __init__(self, params: BloodFlowParameters, flow_share: float = 1.0):
         self.params = params
-        self.is_three_element = params.outlet_windkessel == "3wk"
         share = max(float(flow_share), 1e-6)
         self.flow_share = share
         r_d0, r_p0 = params.resolve_outlet_resistances()
@@ -373,26 +530,20 @@ class OutletWindkesselState:
         else:
             q_drive = float(q_drive)
         self.p_wk = q_share_mean * self.r_d if p_wk is None else float(p_wk)
-        self.p_lumen = (
-            self.p_wk + self.r_p * q_drive if self.is_three_element else self.p_wk
-        )
+        self.p_lumen = self.lumen_pressure(q_drive)
 
     def lumen_pressure(self, q_drive: float) -> float:
-        if self.is_three_element:
-            return self.p_wk + self.r_p * float(q_drive)
-        return self.p_wk
+        """出口/开口管腔压：P_lumen = P_wk + R_p·Q_drive。"""
+        return self.p_wk + self.r_p * float(q_drive)
 
     def coupling_resistance(self) -> float:
-        """由管腔压反解流量时的串联阻力：3wk 用 R_p，2wk 用 R_d。"""
-        if self.is_three_element:
-            return max(self.r_p, 1e-9)
-        return max(self.r_d, 1e-9)
+        """由管腔压反解流量时的串联阻力：RCR 串联近端阻力 R_p。"""
+        return max(self.r_p, 1e-9)
 
     def flow_from_lumen_pressure(self, p_lumen: float) -> float:
         """给定开口/出口管腔压，反解进入 Windkessel 的流量 Q_drive。
 
-        3wk: Q = (P_lumen − P_wk) / R_p
-        2wk: Q = (P_lumen − P_wk) / R_d
+        Q = (P_lumen − P_wk) / R_p
         """
         return (float(p_lumen) - self.p_wk) / self.coupling_resistance()
 
@@ -572,8 +723,7 @@ class NavierStokes1D:
             self.paras.p_ref_mmhg = p_anchor
             print(
                 f"p_ref aligned to outlet steady lumen pressure: "
-                f"{p_ref_user:.2f} → {p_anchor:.2f} mmHg "
-                f"(outlet={self.paras.outlet_windkessel})"
+                f"{p_ref_user:.2f} → {p_anchor:.2f} mmHg (RCR outlet)"
             )
         p_ref = float(self.paras.p_ref_mmhg)
         # 侧支：按 P≈p_ref 时 Q_b≈Murray 份额初始化 P_wk，便于起步
@@ -698,31 +848,99 @@ class NavierStokes1D:
     def _apply_boundaries(
         self, state: np.ndarray, advance: bool = False
     ) -> np.ndarray:
+        """特征相容边界：每端只替换入射波，出射 Riemann 不变量从相邻内点外推。
+
+        亚临界时每端恰好一条特征进入计算域。
+
+        - 入口入射为 λ+：规定 ``Q(0)=Q_in(t)``，用内点的 ``W−=u−4c`` 反解 ``A(0)``。
+          不再把面积做成零梯度 ``A(0)=A(1)``，否则边界状态与出射特征不一致，
+          物理通量 ``F(U_0)`` 不是该边界的相容通量。
+        - 出口入射为 λ−：Windkessel 规定管腔压（经 tube law 成为 ``A(L)``），
+          用内点的 ``W+=u+4c`` 反解 ``Q(L)``，并以此流量推进 RCR。
+        - 若该端出射特征不存在（入口 ``λ−≥0`` 或出口 ``λ+≤0``），退回旧做法：
+          入口面积零梯度，出口保留 PDE 流量、只按压力改面积。
+        """
         u = state.copy()
-    
+        rho = self.paras.momentum_rho()
+        alpha = float(self.paras.alpha)
+
         if not advance:
             q_in = float(np.asarray(self.paras.inlet_flow(self.time)).reshape(-1)[0])
         else:
-            q_in = float(np.asarray(self.paras.inlet_flow(self.time + self._outlet_dt)).reshape(-1)[0])
+            q_in = float(
+                np.asarray(self.paras.inlet_flow(self.time + self._outlet_dt)).reshape(-1)[0]
+            )
+
+        a_in = float(u[0, 1])
+        q_neighbor = float(u[1, 1])
+        _, lam_m = _characteristic_speeds(
+            a_in, q_neighbor, float(self.beta[1]), rho, alpha
+        )
+        if lam_m < 0.0:
+            _, w_minus = _riemann_invariants(
+                a_in, q_neighbor, float(self.beta[1]), rho
+            )
+            u[0, 0] = area_from_flow_and_w_minus(
+                q_in,
+                w_minus,
+                float(self.beta[0]),
+                rho,
+                float(self.area_ref[0]),
+                a_in,
+            )
+        else:
+            u[0, 0] = a_in
         u[1, 0] = q_in
-        # 入口面积：零梯度外推（压力由 tube law 从 A 得到）
-        u[0, 0] = u[0, 1]
 
         # 侧支：Windkessel 压力驱动分流（与主支出口同节拍推进）
         self._apply_side_branches(u, advance=advance)
 
-        # 主支远端出口：Windkessel → P → A
-        q_lumen = float(u[1, -1])
-        if advance and self._outlet_dt > 0.0:
-            _, p_out = self.outlet.advance(self._outlet_dt, q_lumen)
-        else:
-            _, p_out = self.outlet.apply_substep(q_lumen)
-        u[0, -1] = area_from_lumen_pressure_mmhg(
-            p_out,
-            self.area_ref[-1],
-            self.beta[-1],
-            self.paras.p_ref_mmhg,
+        # 主支远端：出射 W+ 与 RCR 压力联立；失败则只定 A、保留 PDE 流量
+        q_pde = float(u[1, -1])
+        a_up = float(u[0, -2])
+        q_up = float(u[1, -2])
+        lam_p, _ = _characteristic_speeds(
+            a_up, q_up, float(self.beta[-2]), rho, alpha
         )
+        q_drive = q_pde
+        used_characteristic = False
+        if lam_p > 0.0:
+            w_plus, _ = _riemann_invariants(
+                a_up, q_up, float(self.beta[-2]), rho
+            )
+            q_char = _outlet_flow_from_w_plus(
+                w_plus,
+                p_wk=float(self.outlet.p_wk),
+                r_p=float(self.outlet.r_p),
+                r_d=float(self.outlet.r_d),
+                compliance=float(self.outlet.c),
+                dt=float(self._outlet_dt) if advance else 0.0,
+                area_ref=float(self.area_ref[-1]),
+                beta=float(self.beta[-1]),
+                p_ref=float(self.paras.p_ref_mmhg),
+                rho_mmhg=rho,
+                q_guess=q_pde,
+            )
+            if q_char is not None:
+                q_drive = float(q_char)
+                used_characteristic = True
+
+        if advance and self._outlet_dt > 0.0:
+            _, p_out = self.outlet.advance(self._outlet_dt, q_drive)
+        else:
+            _, p_out = self.outlet.apply_substep(q_drive)
+        u[0, -1] = float(
+            np.asarray(
+                area_from_lumen_pressure_mmhg(
+                    p_out,
+                    self.area_ref[-1],
+                    self.beta[-1],
+                    self.paras.p_ref_mmhg,
+                )
+            ).reshape(-1)[0]
+        )
+        if used_characteristic:
+            u[1, -1] = q_drive
         return u
 
     @staticmethod
@@ -762,6 +980,7 @@ class NavierStokes1D:
         self,
         duration_s: float,
         record_interval_steps: int = 20,
+        verbose: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         时间推进至 duration_s。
@@ -777,19 +996,21 @@ class NavierStokes1D:
         qb_hist = [self._branch_outflow.copy()]
         step = 0
 
-        print(
-            f"Navier-Stokes 1D: L={self.length:.2f} cm, nx={self.nx}, "
-            f"T={duration_s:.3f} s, outlet={self.paras.outlet_windkessel}, "
-            f"n_branch={len(self.side_branches)}"
-        )
+        if verbose:
+            print(
+                f"Navier-Stokes 1D: L={self.length:.2f} cm, nx={self.nx}, "
+                f"T={duration_s:.3f} s, outlet=RCR, "
+                f"n_branch={len(self.side_branches)}"
+            )
 
         t0 = time.perf_counter()
         while self.time < duration_s - 1e-15:
-            print(
-                f"current time: {self.time:.6f} s / Total: {duration_s:.2f} s",
-                flush=True,
-                end="\r",
-            )
+            if verbose:
+                print(
+                    f"current time: {self.time:.6f} s / Total: {duration_s:.2f} s",
+                    flush=True,
+                    end="\r",
+                )
             dt = self._stable_timestep(self.state)
             if self.time + dt > duration_s:
                 dt = duration_s - self.time
@@ -809,9 +1030,10 @@ class NavierStokes1D:
         self.history_pressure = np.array(p_hist)
         self.history_branch_flow = np.array(qb_hist)
         t1 = time.perf_counter()
-        print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
-        self.print_pressure_diagnostics()
-        self.print_wellposedness_diagnostics()
+        if verbose:
+            print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
+            self.print_pressure_diagnostics()
+            self.print_wellposedness_diagnostics()
         return (
             self.history_area,
             self.history_flow,
@@ -1025,6 +1247,40 @@ class NavierStokes1D:
                 f"tube law 在该处已非线性削平"
             )
         return s
+
+    def mass_balance(self, cycle_s: float = 0.8) -> dict[str, float]:
+        """末段 ``cycle_s`` 秒的质量收支（默认一个心动周期）。
+
+        ``mass_err = <Q(0)> − <Q(L)> − <Σ Q_b>``，与问题清单中的定义一致：
+        周期状态下若格式守恒且管腔体积不再趋势性增减，该值应接近 0。
+        ``dvdt`` 是同一时段管腔体积变化率 ``d/dt Σ A Δx`` 的积分均值。
+        ``residual = dvdt − mass_err`` 把「流量账」和「体积账」对上。
+        """
+        if self.history_time is None or self.history_flow is None or self.history_area is None:
+            raise RuntimeError("请先调用 run()")
+        t = np.asarray(self.history_time, dtype=float)
+        t0 = float(t[-1]) - float(cycle_s)
+        mask = np.ones(t.shape[0], dtype=bool) if t0 <= float(t[0]) else (t >= t0)
+        tt = t[mask]
+        if tt.size < 2:
+            raise RuntimeError("末段采样点不足，无法做积分均值")
+        q_in = integral_mean(self.history_flow[mask, 0], tt)
+        q_out = integral_mean(self.history_flow[mask, -1], tt)
+        if self.history_branch_flow is not None and self.history_branch_flow.size:
+            q_side = integral_mean(np.sum(self.history_branch_flow[mask], axis=1), tt)
+        else:
+            q_side = 0.0
+        volume = np.asarray(self.history_area[mask], dtype=float).sum(axis=1) * self.dx
+        dvdt = integral_mean(np.gradient(volume, tt), tt)
+        mass_err = q_in - q_out - q_side
+        return {
+            "q_in": q_in,
+            "q_out": q_out,
+            "q_side": q_side,
+            "mass_err": mass_err,
+            "dvdt": dvdt,
+            "residual": dvdt - mass_err,
+        }
 
     def ffr_ratio(self, warmup_fraction: float = 0.5) -> np.ndarray:
         """沿程压力 FFR：时间平均 p(x) / p(prox)，期望单调非增。"""
@@ -1273,6 +1529,40 @@ class NavierStokes1D:
             show_kw = {"renderer": renderer} if renderer is not None else {}
             fig.show(**show_kw)
         return fig
+
+
+def run_uniform_tube_mass_check(
+    nx: int = 200,
+    length_cm: float = 5.8,
+    area_cm2: float = 0.056729,
+    duration_s: float = 2.4,
+    cardiac_output_l_per_min: float = 5.0,
+    verbose: bool = False,
+) -> dict[str, float]:
+    """方向 A：等截面直管、无侧支、无狭窄上的质量守恒检查。
+
+    几何取当前狭窄算例的长度与近端参考面积量级。若 ``mass_err`` 相对
+    ``Q_in`` 可忽略，则泄漏不是通用离散或边界通量的共性缺陷。
+    """
+    paras = BloodFlowParameters(cardiac_output_l_per_min=cardiac_output_l_per_min)
+    solver = NavierStokes1D(
+        np.full(int(nx), float(area_cm2)),
+        float(length_cm),
+        paras,
+    )
+    solver.run(duration_s=duration_s, record_interval_steps=8, verbose=verbose)
+    report = solver.mass_balance(cycle_s=60.0 / paras.heart_rate_bpm)
+    report["fr_max"] = float(solver.wellposedness_diagnostics(
+        warmup_fraction=max(0.0, 1.0 - (60.0 / paras.heart_rate_bpm) / duration_s)
+    )["fr_max"])
+    report["n_lesion"] = float(len(solver.lesions))
+    report["n_branch"] = float(len(solver.side_branches))
+    print(
+        f"[uniform tube] Q_in={report['q_in']:.6f} Q_out={report['q_out']:.6f} "
+        f"mass_err={report['mass_err']:.3e} dV/dt={report['dvdt']:.3e} "
+        f"Fr_max={report['fr_max']:.4f}"
+    )
+    return report
 
 
 def demo():

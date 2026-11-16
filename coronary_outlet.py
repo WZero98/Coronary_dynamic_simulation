@@ -7,18 +7,16 @@
 以冠脉入口脉动流量 Q(t) 为驱动，积分得到出口压力 P_out(t)（mmHg）。
 静脉压相对动脉/冠脉管腔压可忽略，电路出口端按零压参考处理。
 
-二元 Windkessel（RC：远端阻力 + 顺应性）
-    C · dP/dt = Q(t) − P / R_d
-    出口管腔压即顺应性节点压力 P。
-
 三元 Windkessel（RCR：近端阻力 + 远端阻力 + 顺应性）
     C · dP_wk/dt = Q(t) − P_wk / R_d
     P_out(t) = P_wk(t) + R_p · Q(t)
     R_p 表征近端特征阻抗/反射，P_wk 为微循环顺应性节点压。
+
+注：二元 RC（P_out = P_wk，相当于 R_p ≡ 0）分支已从本模块移除。
+RCR 是唯一出口模型；若需要二元行为，令 R_p = 0 即可，无需单独分支。
 """
 
 import numpy as np
-from typing import Literal
 
 from coronary_constants import DEFAULT_PROXIMAL_FRACTION, P_INLET_REF_MMHG
 from coronary_inlet import coronary_inlet_flow
@@ -64,14 +62,17 @@ def _steady_windkessel_pressure(
     return p_wk, p_out
 
 
-def _integrate_windkessel2(
+def _integrate_windkessel_p_wk(
     t: np.ndarray,
     q: np.ndarray,
     r_distal: float,
     compliance: float,
     p_init: float | None = None,
 ) -> np.ndarray:
-    """二元 Windkessel 数值积分（RK4），返回出口管腔压 P_out(t)。"""
+    """三元 Windkessel 的 P_wk ODE 数值积分（RK4）；返回顺应性节点压 P_wk(t)。
+
+    C·dP_wk/dt = Q(t) − P_wk/R_d；出口管腔压由调用方加 R_p·Q(t) 得到。
+    """
     t = np.asarray(t, dtype=float)
     q = np.asarray(q, dtype=float)
     if t.size < 2:
@@ -118,53 +119,11 @@ def _integrate_windkessel3(
     q = np.asarray(q, dtype=float)
     rp = float(r_proximal)
 
-    p_wk = _integrate_windkessel2(
+    p_wk = _integrate_windkessel_p_wk(
         t, q, r_distal, compliance, p_init=p_wk_init
     )
     p_out = p_wk + rp * q
     return p_out, p_wk
-
-
-def windkessel2_outlet_pressure(
-    t,
-    q_in,
-    r_distal_mmhg_s_per_ml: float | None = None,
-    compliance_ml_per_mmhg: float = _DEFAULT_C_ML_PER_MMHG,
-    p_init_mmhg: float | None = None,
-):
-    """
-    二元 Windkessel 出口管腔压 P_out(t)（mmHg）。
-
-    Parameters
-    ----------
-    t : array
-        时间 (s)
-    q_in : array
-        驱动流量 Q(t) (mL/s)，与 t 等长
-    r_distal_mmhg_s_per_ml : float, optional
-        远端阻力 R_d；默认由平均流量与参考压标定
-    compliance_ml_per_mmhg : float
-        顺应性 C (mL/mmHg)
-    p_init_mmhg : float, optional
-        初始管腔压；默认取稳态值
-    """
-    t_arr = np.asarray(t, dtype=float)
-    q_arr = np.asarray(q_in, dtype=float)
-    q_mean = float(np.mean(q_arr))
-    rd = (
-        _default_distal_resistance(q_mean)
-        if r_distal_mmhg_s_per_ml is None
-        else float(r_distal_mmhg_s_per_ml)
-    )
-    if p_init_mmhg is None:
-        p_init_mmhg, _ = _steady_windkessel_pressure(q_mean, rd)
-    return _integrate_windkessel2(
-        t_arr,
-        q_arr,
-        rd,
-        compliance_ml_per_mmhg,
-        p_init=p_init_mmhg,
-    )
 
 
 def windkessel3_outlet_pressure(
@@ -283,7 +242,6 @@ def coronary_outlet_flow_distribution(Q_total, outlet_radii, method='murray',
 
 def coronary_outlet_pressure(
     t,
-    model: Literal["2wk", "3wk", "rc", "rcr"] = "2wk",
     heart_rate: float = 75.0,
     cardiac_output: float = 5.0,
     coronary_fraction: float = 0.03,
@@ -291,25 +249,23 @@ def coronary_outlet_pressure(
     **windkessel_kwargs,
 ):
     """
-    冠脉出口管腔压边界条件：入口傅里叶流量 + Windkessel。
+    冠脉出口管腔压边界条件：入口傅里叶流量 + 三元 Windkessel（RCR）。
 
     Parameters
     ----------
     t : array
         时间 (s)
-    model : {'2wk', '3wk', 'rc', 'rcr'}
-        '2wk'/'rc'：二元；'3wk'/'rcr'：三元
     heart_rate, cardiac_output, coronary_fraction
         用于生成 Q(t)（当未提供 q_in 时）
     q_in : array, optional
         自定义驱动流量 (mL/s)
     **windkessel_kwargs
-        传给 windkessel2/3_outlet_pressure 的 R、C 等
+        传给 windkessel3_outlet_pressure 的 R、C 等
 
     Returns
     -------
-    2wk : ndarray, 出口管腔压 P_out(t)
-    3wk : tuple (P_out, P_wk)
+    tuple (P_out, P_wk)
+        P_out 为出口管腔压，P_wk 为顺应性节点压（均 mmHg）
     """
     t_arr = np.asarray(t, dtype=float)
     if q_in is None:
@@ -322,12 +278,7 @@ def coronary_outlet_pressure(
     else:
         q_arr = np.asarray(q_in, dtype=float)
 
-    m = model.lower()
-    if m in ("2wk", "rc"):
-        return windkessel2_outlet_pressure(t_arr, q_arr, **windkessel_kwargs)
-    if m in ("3wk", "rcr"):
-        return windkessel3_outlet_pressure(t_arr, q_arr, **windkessel_kwargs)
-    raise ValueError(f"不支持的 Windkessel 模型: {model!r}，请使用 '2wk' 或 '3wk'")
+    return windkessel3_outlet_pressure(t_arr, q_arr, **windkessel_kwargs)
 
 
 def coronary_outlet_pressure_stats(
@@ -335,10 +286,9 @@ def coronary_outlet_pressure_stats(
     cardiac_output: float = 5.0,
     coronary_fraction: float = 0.03,
     duration_cycles: float = 3.0,
-    model: Literal["2wk", "3wk"] = "2wk",
     **kwargs,
 ) -> dict:
-    """单模型出口压力统计：均值、峰谷、脉动指数等。"""
+    """出口压力统计：均值、峰谷、脉动指数等（三元 RCR）。"""
     period = 60.0 / heart_rate
     t = np.linspace(0.0, duration_cycles * period, int(2000 * duration_cycles))
     q = coronary_inlet_flow(
@@ -352,26 +302,20 @@ def coronary_outlet_pressure_stats(
             if k in ("fourier_coefficients", "min_flow_fraction", "phase_offset")
         },
     )
-    if model == "2wk":
-        p = windkessel2_outlet_pressure(t, q, **kwargs)
-        p_wk = None
-    else:
-        p, p_wk = windkessel3_outlet_pressure(t, q, **kwargs)
+    p, p_wk = windkessel3_outlet_pressure(t, q, **kwargs)
 
     p_mean = float(np.mean(p))
     p_max = float(np.max(p))
     p_min = float(np.min(p))
     out = {
-        "model": model,
         "P_mean_mmHg": p_mean,
         "P_max_mmHg": p_max,
         "P_min_mmHg": p_min,
         "Q_mean_mL_s": float(np.mean(q)),
+        "P_wk_mean_mmHg": float(np.mean(p_wk)),
+        "P_wk_max_mmHg": float(np.max(p_wk)),
+        "P_wk_min_mmHg": float(np.min(p_wk)),
     }
-    if p_wk is not None:
-        out["P_wk_mean_mmHg"] = float(np.mean(p_wk))
-        out["P_wk_max_mmHg"] = float(np.max(p_wk))
-        out["P_wk_min_mmHg"] = float(np.min(p_wk))
     return out
 
 
@@ -384,7 +328,7 @@ def plot_coronary_outlet_pressure(
     r_proximal_mmhg_s_per_ml: float | None = None,
     compliance_ml_per_mmhg: float = _DEFAULT_C_ML_PER_MMHG,
 ):
-    """对比二元 / 三元 Windkessel 出口管腔压与驱动流量。"""
+    """绘制三元 Windkessel（RCR）出口管腔压与驱动流量。"""
     import matplotlib.pyplot as plt
 
     plt.rcParams.update(
@@ -406,8 +350,7 @@ def plot_coronary_outlet_pressure(
         cardiac_output=cardiac_output,
         coronary_fraction=coronary_fraction,
     )
-    p2 = windkessel2_outlet_pressure(t, q, r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml, compliance_ml_per_mmhg=compliance_ml_per_mmhg)
-    p3, p_wk3 = windkessel3_outlet_pressure(
+    p_out, p_wk = windkessel3_outlet_pressure(
         t,
         q,
         r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml,
@@ -415,19 +358,10 @@ def plot_coronary_outlet_pressure(
         compliance_ml_per_mmhg=compliance_ml_per_mmhg,
     )
 
-    stats2 = coronary_outlet_pressure_stats(
+    stats = coronary_outlet_pressure_stats(
         heart_rate=heart_rate,
         cardiac_output=cardiac_output,
         coronary_fraction=coronary_fraction,
-        model="2wk",
-        r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
-        compliance_ml_per_mmhg=compliance_ml_per_mmhg,
-    )
-    stats3 = coronary_outlet_pressure_stats(
-        heart_rate=heart_rate,
-        cardiac_output=cardiac_output,
-        coronary_fraction=coronary_fraction,
-        model="3wk",
         r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml,
         r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
         compliance_ml_per_mmhg=compliance_ml_per_mmhg,
@@ -445,15 +379,14 @@ def plot_coronary_outlet_pressure(
     ax0.legend()
 
     ax1 = axes[0, 1]
-    ax1.plot(t, p2, "C0", lw=2, label=f"二元 WK")
-    ax1.plot(t, p3, "C1", lw=2, label=f"三元 WK")
-    ax1.axhline(stats2["P_mean_mmHg"], color="C0", ls="--", alpha=0.6)
-    ax1.axhline(stats3["P_mean_mmHg"], color="C1", ls="--", alpha=0.6)
+    ax1.plot(t, p_out, "C1", lw=2, label="出口管腔压 P_out")
+    ax1.plot(t, p_wk, "C2", lw=1.5, ls="--", label="顺应性节点压 P_wk")
+    ax1.axhline(stats["P_mean_mmHg"], color="C1", ls=":", alpha=0.6, label="P_out 均值")
     ax1.set_xlabel("时间 (s)")
     ax1.set_ylabel("压力 (mmHg)")
     ax1.set_title("出口管腔内压力 P_out(t)")
     ax1.grid(True, alpha=0.3)
-    ax1.legend()
+    ax1.legend(fontsize=9)
 
     ax2 = axes[1, 0]
     t_one = np.linspace(0.0, period, 500, endpoint=False)
@@ -463,14 +396,14 @@ def plot_coronary_outlet_pressure(
         cardiac_output=cardiac_output,
         coronary_fraction=coronary_fraction,
     )
-    p2_one = windkessel2_outlet_pressure(t_one, q_one, r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
-        compliance_ml_per_mmhg=compliance_ml_per_mmhg,)
-    p3_one, _ = windkessel3_outlet_pressure(
-        t_one, q_one, r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml, r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
+    p_one, _ = windkessel3_outlet_pressure(
+        t_one,
+        q_one,
+        r_proximal_mmhg_s_per_ml=r_proximal_mmhg_s_per_ml,
+        r_distal_mmhg_s_per_ml=r_distal_mmhg_s_per_ml,
         compliance_ml_per_mmhg=compliance_ml_per_mmhg,
     )
-    ax2.plot(t_one, p2_one, "C0", lw=2, label="二元 WK")
-    ax2.plot(t_one, p3_one, "C1", lw=2, label="三元 WK")
+    ax2.plot(t_one, p_one, "C1", lw=2, label="P_out")
     ax2.set_xlabel("时间 (s)")
     ax2.set_ylabel("压力 (mmHg)")
     ax2.set_title("单周期出口压力")
@@ -478,8 +411,8 @@ def plot_coronary_outlet_pressure(
     ax2.legend()
 
     ax3 = axes[1, 1]
-    ax3.plot(t, p_wk3, "C2", lw=1.8, label="三元 WK：P_wk（顺应性节点）")
-    ax3.plot(t, p3 - p_wk3, "C3", lw=1.2, ls="--", label="R_p·Q 近端压降")
+    ax3.plot(t, p_wk, "C2", lw=1.8, label="P_wk（顺应性节点）")
+    ax3.plot(t, p_out - p_wk, "C3", lw=1.2, ls="--", label="R_p·Q 近端压降")
     ax3.set_xlabel("时间 (s)")
     ax3.set_ylabel("压力 (mmHg)")
     ax3.set_title("三元模型分解")
@@ -487,18 +420,16 @@ def plot_coronary_outlet_pressure(
     ax3.legend()
 
     fig.suptitle(
-        f"HR={heart_rate} bpm  |  Q_mean≈{stats2['Q_mean_mL_s']:.2f} mL/s  |  R_d = {r_distal_mmhg_s_per_ml} mmHg·s/mL"
-        f"二元均值 {stats2['P_mean_mmHg']:.1f} mmHg  |  三元均值 {stats3['P_mean_mmHg']:.1f} mmHg",
+        f"HR={heart_rate} bpm  |  Q_mean≈{stats['Q_mean_mL_s']:.2f} mL/s  |  "
+        f"R_d = {r_distal_mmhg_s_per_ml} mmHg·s/mL  |  "
+        f"P_out 均值 {stats['P_mean_mmHg']:.1f} mmHg",
         fontsize=11,
     )
     plt.tight_layout()
     plt.show()
 
-    print("二元 Windkessel 出口压力:")
-    for k, v in stats2.items():
-        print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
-    print("\n三元 Windkessel 出口压力:")
-    for k, v in stats3.items():
+    print("三元 Windkessel 出口压力:")
+    for k, v in stats.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
 
 
@@ -510,12 +441,8 @@ if __name__ == "__main__":
     # rp, rd 可根据提供的流量进行估算，也可以直接给出
     t = np.linspace(0.0, duration_s, int(800 * duration_s))
 
-    p2 = coronary_outlet_pressure(
-        t, model="2wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac,
-        r_distal_mmhg_s_per_ml=r_d,
-    )
-    p3, p_wk = coronary_outlet_pressure(
-        t, model="3wk", heart_rate=hr, cardiac_output=co, coronary_fraction=frac,
+    p_out, p_wk = coronary_outlet_pressure(
+        t, heart_rate=hr, cardiac_output=co, coronary_fraction=frac,
         r_distal_mmhg_s_per_ml=r_d,
         r_proximal_mmhg_s_per_ml=r_p,
     )
