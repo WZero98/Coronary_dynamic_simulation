@@ -21,7 +21,8 @@
 11. [与离线 Windkessel 对比](#11-与离线-windkessel-对比)
 12. [参数调优建议](#12-参数调优建议)
 13. [限制与扩展方向](#13-限制与扩展方向)
-    - [13.1 改为定压（压力驱动）入口](#131-改为定压压力驱动入口)
+    - [13.1 用 q_scale 外环标定入口峰值压](#131-用-q_scale-外环标定入口峰值压)
+    - [13.2 改为定压（压力驱动）入口](#132-改为定压压力驱动入口)
 14. [常见问题](#14-常见问题)
 15. [文件关系速查](#15-文件关系速查)
 
@@ -37,8 +38,9 @@
 | 管壁 | \(p = P_{\mathrm{ref}} + \beta(\sqrt{A}-\sqrt{A_0})\) |
 | 空间离散 | 有限体积 + MUSCL + minmod TVD + HLL |
 | 时间离散 | SSP-RK2 |
-| 入口 | `coronary_inlet.coronary_inlet_flow` |
+| 入口 | `coronary_inlet.coronary_inlet_flow`（经 `BloodFlowParameters.inlet_flow`；`coronary_fraction * q_scale`） |
 | 出口 | 与 `coronary_outlet` 一致的 Windkessel ODE（在线耦合） |
+| 流量标定 | 可选外环 `calibrate_q_scale_to_inlet_peak`：二分 `q_scale`，使入口峰值压落入目标窗（§13.1） |
 | 主输入 | 与网格等长的 \(A_0\) + `BloodFlowParameters`（构造时自动检测狭窄） |
 
 > 本模块**不依赖** `demo/navier_stokes.py`；`demo/` 目录下为早期原型，接口与边界实现不同，请勿混用。
@@ -676,7 +678,7 @@ outlet_proximal_fraction  →  R_p = fraction · R_d（若未显式给 Rp）
 python navier_stokes_1d.py
 ```
 
-调用 `demo()`：从 `data/pred_masks…/area.npy` 读入面积、高斯平滑后构造求解器，默认模拟约 3 s，并用 `plot_results_1()`（Plotly）展示。
+默认入口调用 `example()`：读 `data/stenoses_data`，先用 `calibrate_q_scale_to_inlet_peak` 把入口峰值压收到目标窗，再 `plot_results_1()` 并打印 FFR。也可改 `__main__` 调用 `demo()`（单次 `run`，不标定缩放）。
 
 ### 6.2 最小脚本
 
@@ -692,6 +694,7 @@ area = np.pi * (0.40 - 0.08 * x / L) ** 2
 par = BloodFlowParameters(
     heart_rate_bpm=75.0,
     coronary_flow_fraction=0.03,
+    q_scale=1.0,  # 狭窄有效流量缩放；外环标定见 §13.1
     cfl=0.8,
 )
 
@@ -702,10 +705,23 @@ solver.plot_results()          # matplotlib
 # solver.plot_results_1()      # Plotly 交互图
 ```
 
+需要入口压落在生理窗时，用外环代替单次 `run`（见 §13.1）：
+
+```python
+from navier_stokes_1d import calibrate_q_scale_to_inlet_peak
+
+solver, cal = calibrate_q_scale_to_inlet_peak(area, L, par, duration_s=2.4)
+print(cal["q_scale"], cal["p_in_peak"], cal["converged"])
+print("FFR ≈", solver.ffr_ratio())
+```
+
 ### 6.3 推荐工作流
 
 ```text
-准备 A₀ → BloodFlowParameters → NavierStokes1D(area, L, par) → run → 后处理 / plot_results[_1]
+准备 A₀ → BloodFlowParameters
+  →（可选）calibrate_q_scale_to_inlet_peak  # 入口峰值落入目标窗
+  → 或 NavierStokes1D(...).run()
+  → 后处理 / plot_results[_1] / ffr_ratio
 ```
 
 ---
@@ -803,18 +819,36 @@ solver = NavierStokes1D(area, L, par)
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `heart_rate_bpm` | 75 | 心率 |
-| `cardiac_output_l_per_min` | 5 | 心输出量 (L/min)。注释中的充血参考为 8 |
-| `coronary_flow_fraction` | 0.03 | 冠脉占 CO 比例 |
-| `inlet_min_flow_fraction` | 0.25 | 流量下限 = 该比例 × \(Q_{\mathrm{mean}}\) |
+| `cardiac_output_l_per_min` | 5.5 | 心输出量 (L/min)。注释中的充血参考为 8 |
+| `coronary_flow_fraction` | 0.03 | 冠脉占 CO 比例（生理分流比；狭窄减流不改此字段语义） |
+| `q_scale` | 1.0 | 狭窄有效流量缩放；经 `coronary_fraction * q_scale` 传入入口生成器 |
+| `inlet_min_flow_fraction` | 0.25 | 傅里叶生成器内相对下限 = 该比例 × \(Q_{\mathrm{mean}}\) |
 | `inlet_phase_offset_rad` | 0 | 波形相位偏移 |
 | `inlet_fourier_coefficients` | None | 自定义谐波；None 用模块内置默认系数 |
 
 方法：
 
-- `mean_coronary_flow_ml_s()` → \(Q_{\mathrm{mean}}\)
-- `inlet_flow(t)` → 入口流量数组
+- `mean_coronary_flow_ml_s()` → \(Q_{\mathrm{mean}}=\mathrm{CO}\cdot f_{\mathrm{cor}}\cdot q_{\mathrm{scale}}\cdot 1000/60\)
+- `inlet_flow(t)` → 调用 `coronary_inlet_flow(..., coronary_fraction=f_{\mathrm{cor}}\cdot q_{\mathrm{scale}})`，再截断到 ≥ 0.01 mL/s
 - `resolve_outlet_resistances()` → \((R_d, R_p)\)
 - `momentum_rho()` → 与 mmHg 压配对的有效密度 \(\rho^*\)
+
+#### `q_scale` 如何进入入口波形
+
+`q_scale` **乘在**传给入口生成器的 `coronary_fraction` 上，使均值、谐波幅度与 `min_flow_fraction` 下限共用同一 \(Q_{\mathrm{mean}}\)：
+
+\[
+Q_{\mathrm{mean}}=\mathrm{CO}\cdot f_{\mathrm{cor}}\cdot q_{\mathrm{scale}}\cdot\frac{1000}{60},\qquad
+Q_{\mathrm{in}}(t)=\max\bigl(Q_{\mathrm{fourier}}(t;\,Q_{\mathrm{mean}}),\,0.01\bigr).
+\]
+
+```text
+coronary_flow_fraction  ← 生理分流比（外环不改）
+q_scale                 ← 狭窄/标定用的乘法缩放（默认 1）
+MINIMUM_INLET_FLOW_ML_S ← 0.01 mL/s，峰谷均不得低于此值
+```
+
+外环标定入口峰值压时用 `calibrate_q_scale_to_inlet_peak`（§9.5 / §13.1）。
 
 ### 8.4 出口 Windkessel
 
@@ -823,7 +857,7 @@ solver = NavierStokes1D(area, L, par)
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `outlet_r_distal_mmhg_s_per_ml` | None | \(R_d\)；`None` 则 \(P_{\mathrm{ref}}/Q_{\mathrm{mean}}\) |
+| `outlet_r_distal_mmhg_s_per_ml` | 25 | \(R_d\)；`None` 则 \(P_{\mathrm{ref}}/Q_{\mathrm{mean}}\) |
 | `outlet_r_proximal_mmhg_s_per_ml` | None | \(R_p\)；None 则 `proximal_fraction * R_d` |
 | `outlet_compliance_ml_per_mmhg` | 0.05 | 顺应性 \(C\) |
 | `outlet_proximal_fraction` | 0.1 | 近端阻力比例（`DEFAULT_PROXIMAL_FRACTION`） |
@@ -917,13 +951,16 @@ NavierStokes1D(
 | `area_from_flow_and_w_minus(Q, W−, ...)` | 入口：由定流量与出射不变量反解 \(A\) |
 | `_outlet_flow_from_w_plus(W+, ...)` | 出口：由出射不变量与 RCR 压力联立反解 \(Q\)；失败返回 `None` |
 | `run_uniform_tube_mass_check(...)` | 等截面直管、无侧支的质量守恒检查（方向 A） |
+| `inlet_pressure_peak_mmhg(solver, cycle_s=None)` | 末段一个心动周期（默认 \(60/\mathrm{HR}\)）入口 \(p(0)\) 峰值 |
+| `calibrate_q_scale_to_inlet_peak(...)` | 外环二分标定 `q_scale`；可选 `cache_dir` 落盘每次迭代场数据 |
+| `calibration_cache.py` | 缓存读写与事后绘图（`load` / `plot` / CLI），与主求解器分离 |
 | `_minmod(a, b)` | minmod TVD 限制器 |
 | `_muscl_states(U, A0)` | 界面左右重构态（含面积下限钳位） |
 | `_flux_vector(A, Q, alpha)` | 物理通量 \(F=[Q,\ \alpha Q^2/A]^\mathsf{T}\) |
 | `_hll_flux(...)` | HLL 近似黎曼通量 |
 | `resample_axial_profile(...)`（`geometry.py`） | 沿程面积/侧支重采样到目标 `nx` |
 | `roi_process(roi_idx, ...)` | 按 ROI 下标裁剪面积与侧支 |
-| `demo()` / `example(...)` | 内置算例（`example` 读 `data/stenoses_data`） |
+| `demo()` / `example(...)` | 内置算例；`example` 会先调用 `calibrate_q_scale_to_inlet_peak` 再绘图/算 FFR |
 
 **`NavierStokes1D` 内部方法速查**（便于定位与覆写）：
 
@@ -1160,11 +1197,80 @@ print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}")  # 无侧支时时间平均应接�
 4. **FFR** 为简化压比，非临床标准。
 5. 初值为 \(A=A_0,\; Q=Q_{\mathrm{in}}(0)\)；`p_ref` 会与出口稳态对齐；脉动工况建议 ≥2 个心动周期再取统计量。
 6. \(A_0\) 须已在求解网格上，构造函数**不做**空间插值。
-7. **入口为定流量驱动**。这会使近端压力成为结果（狭窄越重、所需近端压越高），且在小截面喉部可能跨临界壅塞（见 §9.6）。
+7. **入口为定流量驱动**。这会使近端压力成为结果（狭窄越重、所需近端压越高），且在小截面喉部可能跨临界壅塞（见 §9.6）。折中做法：保持定流量 BC，用外环二分 `q_scale` 把入口峰值压收到生理窗（见下节）。
 
 扩展思路：子类化 `NavierStokes1D` 并重写 `_apply_boundaries`；将影像半径/面积在外部插值到目标网格后传入构造；多支血管可在外层循环或多段拼接。
 
-### 13.1 改为定压（压力驱动）入口
+### 13.1 用 `q_scale` 外环标定入口峰值压
+
+**动机**：出口 \(P_{\mathrm{lumen}}\) 由 Windkessel/`R_d` 锚定后，真正需要落在生理范围的是入口 \(p(0,t)\)。定流量下 \(p(0)\) 是结果。用乘法缩放调节有效入口流量，把峰值压拉回目标窗。`q_scale` **不**改写 `coronary_flow_fraction` 的生理语义。
+
+**入口缩放方式**（与 §8.3 一致）：
+
+\[
+Q_{\mathrm{in}}(t)=Q\bigl(t;\,f_{\mathrm{cor}}\cdot q_{\mathrm{scale}}\bigr)
+\]
+
+其中 \(Q\) 由 `coronary_inlet_flow` 生成。
+
+**算法**（`calibrate_q_scale_to_inlet_peak`）：
+
+1. 每次用当前 `q_scale` 构造 `NavierStokes1D` 并完整 `run()`。
+2. 用 `inlet_pressure_peak_mmhg` 取末段一个心动周期的 \(\max p(0,t)\)。
+3. 目标开区间 \((p_{\mathrm{lo}},p_{\mathrm{hi}})\)（`example` 默认 \((90,105)\,\mathrm{mmHg}\)）：
+   - 峰值 \(\ge p_{\mathrm{hi}}\) → 流量过大，搜索上界 `hi ← q_scale`；
+   - 峰值 \(\le p_{\mathrm{lo}}\) → 流量过小，搜索下界 `lo ← q_scale`；
+   - 下一次取中点。
+4. 最多 `max_iters=5`。落入区间则 `converged=True`；否则返回峰值最接近目标窗的一次。
+
+默认搜索 \(q_{\mathrm{scale}}\in[0.05,2]\)。也可传入 `q_scale_min` / `q_scale_max`。首次猜测取参数里已有的 `q_scale`（默认 1）。假定入口峰值压随流量近似单调。
+
+**调用示例**：
+
+```python
+from navier_stokes_1d import BloodFlowParameters, calibrate_q_scale_to_inlet_peak
+
+par = BloodFlowParameters()  # coronary_flow_fraction 保持 0.03
+solver, cal = calibrate_q_scale_to_inlet_peak(
+    area_cm2,
+    length_cm,
+    par,
+    branch_frame_indices=branch_idx,
+    branch_diameters_cm=branch_d,
+    duration_s=3.0,
+    peak_lo_mmhg=90.0,
+    peak_hi_mmhg=105.0,
+    max_iters=5,
+)
+print(cal["converged"], cal["q_scale"], cal["p_in_peak"], cal["q_mean"])
+ffr = solver.ffr_ratio()
+```
+
+**`report` 字段**：
+
+| 键 | 含义 |
+|----|------|
+| `converged` | 峰值是否落入开区间 |
+| `q_scale` | 采用的流量缩放 |
+| `p_in_peak` | 对应入口峰值压 (mmHg) |
+| `q_mean` | 对应入口平均流量 (mL/s) |
+| `n_iters` | 实际 `run()` 次数 |
+| `peak_lo_mmhg` / `peak_hi_mmhg` | 目标窗 |
+| `history` | 每次迭代的 `q_scale`、`p_in_peak`、`q_mean`、`in_range` |
+
+**与 `example()` 的关系**：`example()` 在绘图与 `ffr_ratio()` 之前默认调用本外环。所得 FFR 对应该生理入口压下的流量缩放，不与未标定（`q_scale=1` 硬跑）算例直接比绝对值。
+
+**代价**：最坏若干次完整时程，墙钟时间约为单次 `run` 的数倍。
+
+**说明**：乘法缩放会同时改变流量均值与峰谷差；入口/出口压力脉压差也会随之变化。
+
+**缓存与事后绘图**（避免反复重跑；实现见 `calibration_cache.py`）：
+
+- 传入 `cache_dir=...` 时，每次迭代写入 `iter_XX.npz` 与 `summary.json`。
+- 事后分析：`python calibration_cache.py data/cache/q_scale_cal_...`，或 `from calibration_cache import load_calibration_cache, plot_calibration_iterations`。
+- `example()` 默认缓存到 `data/cache/q_scale_cal_<name>_nx*_T*/`。
+
+### 13.2 改为定压（压力驱动）入口
 
 **动机**：生理上冠脉由主动脉压驱动，流量是结果。定压入口可让近端压力锚定在生理值，并顺带消除跨临界壅塞。
 
@@ -1235,10 +1341,19 @@ A：1 mL = 1 cm³，数值可直接作为 cm³/s 使用。
 A：可能尚未达到周期稳态，或指标定义与临床 FFR 不同；延长 `duration_s` 或用 `prox_idx`/远端网格自定义压比（`demo()` 中有按近端参考归一的示例）。
 
 **Q：如何改入口波形？**  
-A：修改 `BloodFlowParameters` 中心输出量、冠脉比例、傅里叶系数等；细节见 [`coronary_inlet_说明.md`](coronary_inlet_说明.md)。
+A：修改 `BloodFlowParameters` 中心输出量、冠脉比例、傅里叶系数等；细节见 [`coronary_inlet_说明.md`](coronary_inlet_说明.md)。若只想缩放有效入口流量而不改生理分流比语义，改 `q_scale`（或跑 `calibrate_q_scale_to_inlet_peak`）。
+
+**Q：`q_scale` 和 `coronary_flow_fraction` 有何区别？**  
+A：`coronary_flow_fraction` 是生理分流比；`q_scale` 是乘在该比例上的有效流量缩放。\(Q_{\mathrm{mean}}\propto f_{\mathrm{cor}}\cdot q_{\mathrm{scale}}\)。外环标定只动 `q_scale`。详见 [§8.3](#83-入口-coronary_inlet_flow)、[§13.1](#131-用-q_scale-外环标定入口峰值压)。
+
+**Q：`q_scale` 会改变脉压差吗？**  
+A：会。乘法缩放同时改变流量均值与峰谷差，压力脉压差通常也随之变化。
+
+**Q：如何把入口压力峰值收到生理窗？**  
+A：调用 `calibrate_q_scale_to_inlet_peak(...)`（二分，最多 5 次 `run`）。`example()` 已默认接入。见 [§13.1](#131-用-q_scale-外环标定入口峰值压)。
 
 **Q：如何改出口阻力/顺应性？**  
-A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等；与 `coronary_outlet` 中参数含义相同。
+A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等；与 `coronary_outlet` 中参数含义相同。当前默认 `Rd=25`；显式给定 `Rd` 且开启 `align_p_ref_to_outlet` 时，初始 `p_ref_mmhg` 会被出口稳态 \(P_{\mathrm{lumen}}\) 覆盖。
 
 **Q：无 GUI 如何出图？**  
 A：matplotlib：`MPLBACKEND=Agg` 后自行 `savefig`；Plotly：`plot_results_1(show=False)` 再 `fig.write_html(...)`。
@@ -1265,7 +1380,7 @@ A：两者是不同的事。CFL 只保证数值稳定性（\(\Delta t \le \mathr
 A：是同一判据的三种写法。\(\mathrm{Fr}=\lvert u\rvert/c\)；\(Q_{\text{crit}}=cA\) 是 \(\mathrm{Fr}=1\) 对应的流量。注意含 \(\alpha\) 修正的严格判据用 \(\lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}\)，跨临界区间会比简化的 \(\lvert u\rvert>c\) 略宽（本项目实测 9 个节点 vs 7 个）。
 
 **Q：能把参考压力 `p_ref` 绑到近端压力吗？**  
-A：**不能达到你认为的效果**。`p_ref` 只是 tube law 的零点，平移它会让整条压力曲线整体平移，而 \(A/Q\) 场**完全不变**（gauge 不变性）。且只改 `p_ref` 不同步平移出口 Windkessel 压力会算错出口面积。若要近端压力落在生理值，必须改**入口驱动方式**（→ §13.1）。详见 `docs/边界条件分析报告.md`。
+A：**不能达到你认为的效果**。`p_ref` 只是 tube law 的零点，平移它会让整条压力曲线整体平移，而 \(A/Q\) 场**完全不变**（gauge 不变性）。且只改 `p_ref` 不同步平移出口 Windkessel 压力会算错出口面积。若要近端压力落在生理值，可外环标定 `q_scale`（→ §13.1）或改**入口驱动方式**（→ §13.2）。详见 `docs/边界条件分析报告.md`。
 
 ---
 
@@ -1274,6 +1389,7 @@ A：**不能达到你认为的效果**。`p_ref` 只是 tube law 的零点，平
 ```text
 FFR_1D/
 ├── navier_stokes_1d.py      # 本求解器 ★
+├── calibration_cache.py     # q_scale 标定缓存读写与事后绘图
 ├── docs/navier_stokes_1d.md # 本文档
 ├── geometry.py              # 近远端参考与狭窄检测
 ├── coronary_constants.py    # 共享公开全局常量

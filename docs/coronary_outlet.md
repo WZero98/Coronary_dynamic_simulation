@@ -30,9 +30,7 @@
 
 > **二元 Windkessel（RC）已移除**（`model="2wk"` / `"rc"` 分支、`windkessel2_outlet_pressure`
 > 均不再存在）。理由：二元只是三元的退化情形，令 \(R_p=0\) 即得
-> \(P_{\mathrm{out}} = P_{\mathrm{wk}}\)；保留两条代码路径会让阻力标定与返回值形状
-> （`ndarray` vs `tuple`）出现分叉，易在使用中出错。现行做法是统一返回
-> \((P_{\mathrm{out}}, P_{\mathrm{wk}})\)。
+> \(P_{\mathrm{out}} = P_{\mathrm{wk}}\)
 
 **驱动流量**默认来自同仓库 `coronary_inlet.py` 的 `coronary_inlet_flow`（傅里叶级数生理波形）；也可传入任意与 `t` 等长的 `q_in` 数组。
 
@@ -100,8 +98,7 @@ P_{\mathrm{out}}(t) = P_{\mathrm{wk}}(t) + R_p\, Q(t)
 
 > **关于已移除的二元 RC**：等价于本模型的 \(R_p = 0\) 特例
 > （\(P_{\mathrm{out}} = P_{\mathrm{wk}}\)，稳态 \(P_{\mathrm{ss}} = \bar{Q}R_d\)）。
-> 不再提供独立的 `model="2wk"` 分支与 `windkessel2_outlet_pressure` 函数；
-> 需要该行为时传 `r_proximal_mmhg_s_per_ml=0.0`。
+模型中的 P(t) 通常指入口处压力（如主动脉根部压力），而非血管树中某一点的压力。它描述的是“心脏看到的后负荷”，而不是局部血管壁承受的压力。
 
 ### 3.2 与 `demo/outlet_boundary_condition.py` 的关系
 

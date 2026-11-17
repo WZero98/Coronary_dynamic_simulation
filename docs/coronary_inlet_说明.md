@@ -416,23 +416,27 @@ from navier_stokes_1d import BloodFlowParameters, NavierStokes1D
 par = BloodFlowParameters(
     heart_rate_bpm=75.0,
     cardiac_output_l_per_min=5.5,
-    coronary_flow_fraction=0.03,       # 求解器默认 0.03
-    inlet_min_flow_fraction=0.1,
+    coronary_flow_fraction=0.03,       # 生理分流比（语义不因狭窄改写）
+    q_scale=1.0,                       # 狭窄有效流量缩放；外环可标定
+    inlet_min_flow_fraction=0.25,
     inlet_phase_offset_rad=0.0,
     inlet_fourier_coefficients=None,   # None → 使用 coronary_inlet 内置系数
 )
 # area：沿程 A₀ (cm²)，节点数由 len(area) 决定
 solver = NavierStokes1D(area, length_cm, par)
-Q_in = par.inlet_flow(t)              # 等价于 coronary_inlet_flow(..., coronary_fraction=0.03)
+# 等价于 coronary_inlet_flow(..., coronary_fraction=0.03 * q_scale)
+Q_in = par.inlet_flow(t)
 ```
+
+`q_scale` 乘在传入本模块的 `coronary_fraction` 上（`f_cor * q_scale`），使均值/谐波/`min_flow` 下限共用同一 \(Q_{\mathrm{mean}}\)。外环标定只动 `q_scale`。详见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §8.3、§13.1。
 
 若修改模板形态，应：
 
 1. `fit_fourier_coefficients(**template_kw)` 得到新系数；
 2. 设置 `inlet_fourier_coefficients=coeffs`；
-3. 保持 `coronary_flow_fraction` 与 Windkessel 标定用的 \(Q_{\mathrm{mean}}\) 一致（见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §5.5）。
+3. 保持 `coronary_flow_fraction`（及标定后的 `q_scale`）与 Windkessel / 均值流量一致（见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §5.5、§13.1）。
 
-初值：`set_lumen_area_profile` 会将沿程流量初值设为 `Q_in(0)`，与入口 BC 对齐。
+初值：构造 `NavierStokes1D` 时沿程流量初值取 `Q_in(0)`（含 `q_scale`），与入口 BC 对齐。
 ---
 
 ## 12. 默认常量速查（`coronary_inlet.py` 当前版本）

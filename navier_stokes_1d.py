@@ -63,15 +63,17 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 时间步长：CFL 自适应
 """
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
 import numpy as np
 
 from branch import prepare_side_branches
+from calibration_cache import iteration_snapshot, save_calibration_cache
 from coronary_constants import (
     DEFAULT_PROXIMAL_FRACTION,
     MINIMUM_AREA_RATIO,
+    MINIMUM_INLET_FLOW_ML_S,
     P_INLET_REF_MMHG,
     rho_for_mmhg_pressure_coupling,
 )
@@ -430,41 +432,49 @@ class BloodFlowParameters:
 
     # 冠脉血流入口相关
     heart_rate_bpm: float = 75.0  # 心率 (bpm)
-    cardiac_output_l_per_min: float = 5  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为8L/min
-    coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例
+    cardiac_output_l_per_min: float = 5.5  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为8L/min
+    coronary_flow_fraction: float = 0.03  # 左冠脉血流占心脏输出量的比例（生理分流比，不因狭窄改语义）
+    q_scale: float = 1.0  # 狭窄有效流量缩放；经 coronary_fraction*q_scale 传入入口生成器
     inlet_min_flow_fraction: float = 0.25  # 流量下限，即最小值占整个流量平均值的比例
     inlet_phase_offset_rad: float = 0.0  # 波形相位偏移
     inlet_fourier_coefficients: Sequence[tuple[int, float, float]] | None = None  # 自定义谐波（傅里叶变换的系数）；None 用模块内置默认系数
 
-    # 出口 Windkessel 模型相关（三元 RCR；二元 RC 已移除，见 docs §5.2）
-    outlet_r_distal_mmhg_s_per_ml: float | None = None  # Rd 远端阻力系数
+    # 出口 Windkessel 模型相关（三元 RCR）
+    outlet_r_distal_mmhg_s_per_ml: float | None = 25  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
-    outlet_compliance_ml_per_mmhg: float = 0.05  # 血管顺应性，越大顺应性越好 
+    outlet_compliance_ml_per_mmhg: float = 0.01  # 血管顺应性，越大顺应性越好 
     outlet_proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION  # 近端阻力比例
 
     def mean_coronary_flow_ml_s(self) -> float:
-        """入口平均流量 (mL/s)。"""
+        """入口平均流量 (mL/s)，含 ``q_scale``。"""
         return (
             self.cardiac_output_l_per_min
             * 1000.0
             * self.coronary_flow_fraction
             / 60.0
+            * float(self.q_scale)
         )
 
     def inlet_flow(self, t: float | np.ndarray) -> np.ndarray:
-        """生成时间t的入口流量 (mL/s)。"""
-        return np.asarray(
+        """生成时间t的入口流量 (mL/s)。
+
+        ``q_scale`` 乘在 ``coronary_fraction`` 上再交给入口波形生成，
+        使均值、傅里叶谐波与 ``min_flow_fraction`` 下限共用同一 ``Q_mean``；
+        返回值再钳到 ``MINIMUM_INLET_FLOW_ML_S`` (0.01 mL/s)。
+        """
+        q = np.asarray(
             coronary_inlet_flow(
                 t,
                 heart_rate=self.heart_rate_bpm,
                 cardiac_output=self.cardiac_output_l_per_min,
-                coronary_fraction=self.coronary_flow_fraction,
+                coronary_fraction=self.coronary_flow_fraction * float(self.q_scale),
                 fourier_coefficients=self.inlet_fourier_coefficients,
                 min_flow_fraction=self.inlet_min_flow_fraction,
                 phase_offset=self.inlet_phase_offset_rad,
             ),
             dtype=float,
         )
+        return np.maximum(q, float(MINIMUM_INLET_FLOW_ML_S))
 
     def resolve_outlet_resistances(self) -> tuple[float, float]:
         """远端/近端阻力 (mmHg·s/mL)，与 coronary_outlet 默认标定一致。"""
@@ -1695,6 +1705,159 @@ def roi_process(roi_idx, area, branch_idx, branch_d):
 
 
 
+def inlet_pressure_peak_mmhg(
+    solver: "NavierStokes1D",
+    cycle_s: float | None = None,
+) -> float:
+    """末段一个心动周期内入口 ``p(0,t)`` 的峰值 (mmHg)。"""
+    if solver.history_time is None or solver.history_pressure is None:
+        raise RuntimeError("请先调用 run()")
+    t = np.asarray(solver.history_time, dtype=float)
+    if cycle_s is None:
+        cycle_s = 60.0 / float(solver.paras.heart_rate_bpm)
+    t0 = float(t[-1]) - float(cycle_s)
+    mask = np.ones(t.shape[0], dtype=bool) if t0 <= float(t[0]) else (t >= t0)
+    if int(np.count_nonzero(mask)) < 2:
+        raise RuntimeError("末段采样点不足，无法取入口压力峰值")
+    return float(np.max(solver.history_pressure[mask, 0]))
+
+
+def calibrate_q_scale_to_inlet_peak(
+    area_cm2: np.ndarray | list,
+    vessel_length_cm: float,
+    parameters: BloodFlowParameters | None = None,
+    *,
+    branch_frame_indices: Optional[Sequence[int]] = None,
+    branch_diameters_cm: Optional[Sequence[float]] = None,
+    apply_murray_scale: bool = True,
+    align_p_ref_to_outlet: bool = True,
+    duration_s: float = 3.0,
+    record_interval_steps: int = 30,
+    peak_lo_mmhg: float = 90.0,
+    peak_hi_mmhg: float = 105.0,
+    q_scale_min: float = 0.05,
+    q_scale_max: float = 2.0,
+    max_iters: int = 5,
+    verbose: bool = True,
+    cache_dir: str | None = None,
+) -> tuple["NavierStokes1D", dict]:
+    """外环二分标定 ``q_scale``，使入口压力峰值落入 ``(peak_lo, peak_hi)``。
+
+    不改 ``coronary_flow_fraction``：生成入口时用 ``fraction * q_scale``。
+    假定定流量入口下峰值压随流量近似单调：峰值过高则减小 ``q_scale``，过低则增大。
+
+    若给定 ``cache_dir``，每次迭代写入 ``iter_XX.npz`` + ``summary.json``；
+    事后读图用 ``python calibration_cache.py <cache_dir>``。
+
+    Returns
+    -------
+    solver, report
+        ``report`` 含 ``q_scale``、``p_in_peak``、``converged``、``history`` 等。
+    """
+    if peak_hi_mmhg <= peak_lo_mmhg:
+        raise ValueError("peak_hi_mmhg 须大于 peak_lo_mmhg")
+    if q_scale_max <= q_scale_min:
+        raise ValueError("q_scale_max 须大于 q_scale_min")
+    if max_iters < 1:
+        raise ValueError("max_iters 至少为 1")
+
+    base = parameters if parameters is not None else BloodFlowParameters()
+    lo = float(q_scale_min)
+    hi = float(q_scale_max)
+    q = float(np.clip(base.q_scale, lo, hi))
+    target = 0.5 * (float(peak_lo_mmhg) + float(peak_hi_mmhg))
+    history: list[dict] = []
+    best_solver: NavierStokes1D | None = None
+    best_score = float("inf")
+    best_rec: dict | None = None
+
+    if verbose:
+        print(
+            f"calibrate q_scale: target p(0) peak in ({peak_lo_mmhg:.1f}, "
+            f"{peak_hi_mmhg:.1f}) mmHg, search [{lo:.3f}, {hi:.3f}], "
+            f"max_iters={max_iters}"
+        )
+
+    def _finish(solver: NavierStokes1D, converged: bool) -> tuple[NavierStokes1D, dict]:
+        assert best_rec is not None
+        last = history[-1]
+        report = {
+            "converged": converged,
+            "q_scale": float(last["q_scale"] if converged else best_rec["q_scale"]),
+            "p_in_peak": float(last["p_in_peak"] if converged else best_rec["p_in_peak"]),
+            "q_mean": float(last["q_mean"] if converged else best_rec["q_mean"]),
+            "n_iters": len(history),
+            "peak_lo_mmhg": float(peak_lo_mmhg),
+            "peak_hi_mmhg": float(peak_hi_mmhg),
+            "history": history,
+        }
+        if cache_dir is not None:
+            path = save_calibration_cache(report, cache_dir)
+            if verbose:
+                print(f"  cached iterations → {path}")
+        return solver, report
+
+    for it in range(1, int(max_iters) + 1):
+        paras = replace(base, q_scale=q)
+        solver = NavierStokes1D(
+            area_cm2,
+            vessel_length_cm,
+            paras,
+            branch_frame_indices=branch_frame_indices,
+            branch_diameters_cm=branch_diameters_cm,
+            apply_murray_scale=apply_murray_scale,
+            align_p_ref_to_outlet=align_p_ref_to_outlet,
+        )
+        solver.run(
+            duration_s=duration_s,
+            record_interval_steps=record_interval_steps,
+            verbose=False,
+        )
+        peak = inlet_pressure_peak_mmhg(solver)
+        in_range = bool(peak_lo_mmhg < peak < peak_hi_mmhg)
+        if in_range:
+            score = 0.0
+        elif peak >= peak_hi_mmhg:
+            score = peak - peak_hi_mmhg
+        else:
+            score = peak_lo_mmhg - peak
+        score = float(score) + 1e-3 * abs(peak - target)
+
+        snap = iteration_snapshot(solver, it, q, peak, in_range)
+        history.append(snap)
+        if verbose:
+            print(
+                f"  iter {it}/{max_iters}: q_scale={q:.4f}, "
+                f"p(0)_peak={peak:.2f} mmHg, Q_mean={snap['q_mean']:.3f} mL/s"
+                + ("  [OK]" if in_range else "")
+            )
+
+        if score < best_score:
+            best_score = score
+            best_solver = solver
+            best_rec = snap
+
+        if in_range:
+            return _finish(solver, True)
+
+        if peak >= peak_hi_mmhg:
+            hi = q
+        else:
+            lo = q
+        if abs(hi - lo) < 1e-9:
+            break
+        q = 0.5 * (lo + hi)
+
+    assert best_solver is not None and best_rec is not None
+    if verbose:
+        print(
+            f"  not converged in {max_iters} iters; "
+            f"best q_scale={float(best_rec['q_scale']):.4f}, "
+            f"p(0)_peak={float(best_rec['p_in_peak']):.2f} mmHg"
+        )
+    return _finish(best_solver, False)
+
+
 def example(
     target_nx: int | None = 100,
     frame_spacing_cm: float = 0.02,
@@ -1702,7 +1865,11 @@ def example(
     sigma_nodes: float = 4,
     name: str = 'Null',
 ):
-    """下游 joblib 数据示例；``target_nx`` 控制轴向降采样（None=不降采样）。"""
+    """下游 joblib 数据示例；``target_nx`` 控制轴向降采样（None=不降采样）。
+
+    先用 ``calibrate_q_scale_to_inlet_peak`` 把入口峰值压收到目标窗，
+    再在该 ``q_scale`` 下绘图并返回 FFR。
+    """
     import joblib
     from scipy.ndimage import gaussian_filter1d
     import os
@@ -1739,16 +1906,42 @@ def example(
     print(nx, length, f"n_branch={len(branch_idx)}")
 
     parameters = BloodFlowParameters()
-    solver = NavierStokes1D(
+    cache_dir = os.path.join(
+        "data",
+        "cache",
+        f"q_scale_cal_{name}_nx{nx}_T{duration_s:.2f}",
+    )
+    solver, cal = calibrate_q_scale_to_inlet_peak(
         area_smooth,
         length,
         parameters,
         branch_frame_indices=branch_idx,
         branch_diameters_cm=branch_d,
-        # 默认 apply_murray_scale=True、align_p_ref_to_outlet=True
+        duration_s=duration_s,
+        record_interval_steps=30,
+        peak_lo_mmhg=90.0,
+        peak_hi_mmhg=105.0,
+        max_iters=10,
+        verbose=True,
+        cache_dir=cache_dir,
     )
-    solver.run(duration_s=duration_s, record_interval_steps=30)
-    solver.plot_results_1(title=f"{name}_nx{nx}")
+    print(
+        f"calibrated: converged={cal['converged']}, "
+        f"q_scale={cal['q_scale']:.4f}, "
+        f"p(0)_peak={cal['p_in_peak']:.2f} mmHg, Q_mean={cal['q_mean']:.3f} mL/s"
+    )
+    print(f"cache_dir={cal.get('cache_dir', cache_dir)}")
+
+    html_path = os.path.join(
+        cal.get("cache_dir", cache_dir),
+        f"final_nx{nx}_qs{cal['q_scale']:.3f}.html",
+    )
+    solver.plot_results_1(
+        title=f"{name}_nx{nx}_qs{cal['q_scale']:.3f}",
+        show=False,
+        save_path=html_path,
+    )
+    print(f"saved final plotly: {html_path}")
 
     assert solver.history_time is not None
     assert solver.history_flow is not None
@@ -1772,5 +1965,5 @@ def example(
 if __name__ == "__main__":
     # ffr = demo()
     # target_nx=100 降采样；改为 None 可跑原始分辨率对比准确率
-    ffr = example(target_nx=200)
-    print(f"max ffr: {np.max(ffr)}/n min ffr: {np.min(ffr)}")
+    ffr = example(target_nx=200, name="stenoses")
+    print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")

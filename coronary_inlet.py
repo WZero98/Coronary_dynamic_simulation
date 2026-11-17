@@ -23,7 +23,7 @@ _DEFAULT_N_HARMONICS = 7
 _DEFAULT_SYSTOLIC_DURATION_FRAC = 0.30
 _DEFAULT_DIASTOLIC_PEAK = 1.2
 _DEFAULT_SYSTOLIC_TO_DIASTOLIC_PEAK_RATIO = 0.65
-_DEFAULT_BASELINE_LEVEL = 0.30
+_DEFAULT_BASELINE_LEVEL = 0.35
 _DEFAULT_SYSTOLIC_EARLY_PEAK_FRAC = 0.18
 _DEFAULT_JUNCTION_FLOW_FRAC = 0.85
 _DEFAULT_DIASTOLIC_PEAK_FRAC = 0.3
@@ -168,13 +168,13 @@ def _build_default_fourier_coefficients() -> tuple[tuple[int, float, float], ...
 
 
 _DEFAULT_FOURIER_COEFFICIENTS: tuple[tuple[int, float, float], ...] = (
-    (1, 0.44887772859540204, -0.97001376785165),
-    (2, 0.0762604566059001, 0.31621560697732726),
-    (3, 0.06083173051139606, -0.8077508811594731),
-    (4, 0.028938933930242834, -0.05184765549036844),
-    (5, 0.0319754353263785, -0.618180419486564),
-    (6, 0.02527608830162421, -0.5120567690712592),
-    (7, 0.021691194922033058, -1.0371707547639064)
+    (1, 0.40656665216583115, -1.0042747400983518),
+    (2, 0.06296941676473222, 0.3706744668301571),
+    (3, 0.05184651834561802, -0.8503854982161582),
+    (4, 0.02318343446099256, 0.015660516724841797),
+    (5, 0.026854893772260538, -0.6035747269156821),
+    (6, 0.02141985374810064, -0.49361544665620977),
+    (7, 0.018330726485070434, -1.0553538607375905)
 ) if 1 else _build_default_fourier_coefficients()  # 已通过模版拟合出傅里叶系数后不再需要每次重新计算
 
 
@@ -390,7 +390,7 @@ if __name__ == "__main__":
     print("模板峰值指标:", template_peak_metrics())
     
     heart_rate: float = 75.
-    cardiac_output: float = 5  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为7L/min
+    cardiac_output: float = 5.5  # 心脏输出量 (L/min)  静息心输出量设为5L/min, 充血状态时心输出量设为7L/min
     coronary_fraction: float = 0.03
     duration_s: float = 5
     min_flow_fraction = 0.25

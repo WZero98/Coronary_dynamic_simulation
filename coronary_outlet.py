@@ -22,7 +22,7 @@ from coronary_constants import DEFAULT_PROXIMAL_FRACTION, P_INLET_REF_MMHG
 from coronary_inlet import coronary_inlet_flow
 
 # 默认微循环参数（以下划线开头的常量仅在本模块内使用）
-_DEFAULT_C_ML_PER_MMHG = 0.08
+_DEFAULT_C_ML_PER_MMHG = 0.01
 _DEFAULT_Q_MEAN_ML_S = 3
 
 
@@ -163,81 +163,6 @@ def windkessel3_outlet_pressure(
         compliance_ml_per_mmhg,
         p_wk_init=p_wk_init_mmhg,
     )
-
-
-def coronary_outlet_flow_distribution(Q_total, outlet_radii, method='murray',
-                                     flow_fractions=None, cardiac_phase=None):
-    """
-    冠状动脉出口流量分配函数。
-    
-    基于解剖学缩放法则和生理学原理，将总冠状动脉流量分配到各个出口。
-    
-    参考文献：
-    1. Murray CD. "The physiological principle of minimum work applied to 
-       the angle of branching of arteries." J Gen Physiol, 1926;9(6):835-841.
-    2. van der Giessen AG, et al. "The influence of boundary conditions on 
-       wall shear stress distribution in patient specific coronary trees."
-       J Biomech, 2011;44(6):1089-1095.
-    3. Taylor CA, et al. "Patient-specific modeling of cardiovascular 
-       mechanics." Annu Rev Biomed Eng, 2009;11:109-134.
-    
-    参数：
-    Q_total : float or array
-        总冠状动脉入口流量(mL/s)，可以是标量或时间序列
-    outlet_radii : array
-        各出口血管半径(cm)
-    method : str
-        分配方法：
-        - 'murray': Murray's Law, Q ∝ r³
-        - 'area': 面积比例, Q ∝ r²
-        - 'custom': 自定义流量分数
-    flow_fractions : array, optional
-        自定义流量分数(method='custom'时使用)，应为总和为1的数组
-
-    返回：
-    Q_outs : array
-        各出口分配的流量(mL/s)，形状为(len(outlet_radii), len(t))
-    """
-    
-    # 处理输入
-    Q_total_arr = np.atleast_1d(Q_total)
-    n_outlets = len(outlet_radii)
-    n_time = len(Q_total_arr)
-    
-    # 计算出口半径
-    radii = np.array(outlet_radii)
-    
-    # 根据不同方法计算分配权重
-    if method == 'murray':
-        # Murray's Law: 父血管半径的立方等于子血管半径立方之和
-        # Q ∝ r³
-        weights = radii ** 3
-        
-    elif method == 'area':
-        # 面积比例分配: Q ∝ r²
-        weights = radii ** 2
-        
-    elif method == 'murray_modified':
-        # 改进的Murray's Law (考虑冠脉特殊性)
-        # 指数通常在2.27-3.0之间
-        exponent = 2.7  # 冠状动脉常用指数
-        weights = radii ** exponent
-        
-    elif method == 'custom':
-        if flow_fractions is None:
-            raise ValueError("使用'custom'方法时必须提供flow_fractions参数")
-        weights = np.array(flow_fractions)
-        
-    else:
-        raise ValueError(f"不支持的分配方法: {method}")
-    
-    # 归一化权重
-    weights = weights / np.sum(weights)
-    
-    # 分配流量
-    Q_outs = np.outer(weights, Q_total_arr).T
-    
-    return Q_outs.squeeze()
 
 
 def coronary_outlet_pressure(
@@ -437,7 +362,7 @@ if __name__ == "__main__":
     hr, co, frac = 75.0, 5.5, 0.03
     duration_s = 15
     r_d = 25
-    r_p = 0.3 * r_d if r_d is not None else None
+    r_p = 0.2 * r_d if r_d is not None else None
     # rp, rd 可根据提供的流量进行估算，也可以直接给出
     t = np.linspace(0.0, duration_s, int(800 * duration_s))
 
