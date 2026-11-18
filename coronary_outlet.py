@@ -22,7 +22,7 @@ from coronary_constants import DEFAULT_PROXIMAL_FRACTION, P_INLET_REF_MMHG
 from coronary_inlet import coronary_inlet_flow
 
 # 默认微循环参数（以下划线开头的常量仅在本模块内使用）
-_DEFAULT_C_ML_PER_MMHG = 0.01
+_DEFAULT_C_ML_PER_MMHG = 0.012
 _DEFAULT_Q_MEAN_ML_S = 3
 
 

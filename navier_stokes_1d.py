@@ -442,7 +442,7 @@ class BloodFlowParameters:
     # 出口 Windkessel 模型相关（三元 RCR）
     outlet_r_distal_mmhg_s_per_ml: float | None = 25  # Rd 远端阻力系数
     outlet_r_proximal_mmhg_s_per_ml: float | None = None  # Rp 近端阻力系数
-    outlet_compliance_ml_per_mmhg: float = 0.01  # 血管顺应性，越大顺应性越好 
+    outlet_compliance_ml_per_mmhg: float = 0.012  # 血管顺应性，越大顺应性越好 
     outlet_proximal_fraction: float = DEFAULT_PROXIMAL_FRACTION  # 近端阻力比例
 
     def mean_coronary_flow_ml_s(self) -> float:
