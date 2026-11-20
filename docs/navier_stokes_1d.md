@@ -106,15 +106,57 @@ S = \begin{bmatrix}
 \end{bmatrix}
 \]
 
-| 符号 | 含义 |
-|------|------|
-| \(A\) | 血管截面积 |
-| \(Q\) | 体积流量（沿 \(x\) 正向为出口方向） |
-| \(\rho^*\) | 与 mmHg 制管腔压配对的动量有效密度（`momentum_rho()`） |
-| \(\alpha\) | 动量修正系数（层流常取 1.1） |
-| \(\nu\) | 运动粘度（cm²/s，= 动力粘度/\(\rho\)） |
-| 压力驱动 | **源项** \(-(A/\rho^*)\partial_x p\)，\(p\) 由 tube law 在单元中心计算 |
-| 摩擦项 | Poiseuille 型 \(-8\pi\nu Q/A\) |
+| 符号 | 含义 | 单位 |
+|------|------|------|
+| \(A\) | 血管截面积 | \(\mathrm{cm}^2\) |
+| \(Q\) | 体积流量（沿 \(x\) 正向为出口方向） | \(\mathrm{cm}^3/\mathrm{s}\) |
+| \(\rho\) | 血液真实密度（`BloodFlowParameters.rho`） | \(\mathrm{g/cm}^3\)（默认 1.06） |
+| \(\rho^*\) | 与 mmHg 制管腔压配对的**动量有效密度**（见下） | \(\mathrm{mmHg}\cdot\mathrm{s}^2/\mathrm{cm}^2\)（**不是** \(\mathrm{g/cm}^3\)） |
+| \(\alpha\) | 动量修正系数（层流常取 1.1） | — |
+| \(\nu\) | 运动粘度（= 动力粘度/\(\rho\)） | \(\mathrm{cm}^2/\mathrm{s}\) |
+| \(p\) | 管腔压（tube law） | \(\mathrm{mmHg}\) |
+| 压力驱动 | **源项** \(-(A/\rho^*)\partial_x p\) | 使 \(\partial_t Q\) 为 \(\mathrm{cm}^3/\mathrm{s}^2\) |
+| 摩擦项 | Poiseuille 型 \(-8\pi\nu Q/A\) | 同上 |
+
+#### \(\rho^*\) 的定义与单位（对应上式中的 \((A/\rho^*)\partial_x p\)）
+
+CGS 文献标准式使用真实密度 \(\rho\) 与压强单位 \(\mathrm{dyne/cm}^2\)：
+
+\[
+\partial_t Q+\partial_x\!\left(\alpha\frac{Q^2}{A}\right)+\frac{A}{\rho}\partial_x p_{\mathrm{dyne}}
+=-\frac{8\pi\nu Q}{A}.
+\]
+
+本仓库 tube law 输出 \(p\) 为 **mmHg**。换算
+
+\[
+1\,\mathrm{mmHg}=1333.2\,\mathrm{dyne/cm}^2
+=\texttt{MMHG\_TO\_DYNE\_PER\_CM2}
+\quad(10\times 133.32),
+\]
+
+故 \(\partial_x p_{\mathrm{dyne}}=\texttt{MMHG\_TO\_DYNE\_PER\_CM2}\cdot\partial_x p_{\mathrm{mmHg}}\)。代入后
+
+\[
+\frac{A}{\rho}\partial_x p_{\mathrm{dyne}}
+=\frac{A}{\rho^*}\partial_x p_{\mathrm{mmHg}},
+\qquad
+\boxed{\;\rho^*=\dfrac{\rho}{\texttt{MMHG\_TO\_DYNE\_PER\_CM2}}
+=\dfrac{\rho}{1333.2}\;}
+\]
+
+（代码：`momentum_rho()` → `rho_for_mmhg_pressure_coupling`）。默认 \(\rho=1.06\) 时 \(\rho^*\approx 7.951\times 10^{-4}\,\mathrm{mmHg}\cdot\mathrm{s}^2/\mathrm{cm}^2\)。
+
+**量纲核对**（混合单位下 \(\rho^*\) 不再是 \(\mathrm{g/cm}^3\)）：
+
+| 量 | 单位 |
+|----|------|
+| \(\rho\) | \(\mathrm{g/cm}^3\) |
+| \(\texttt{MMHG\_TO\_DYNE}\) | \(\mathrm{dyne}/(\mathrm{cm}^2\cdot\mathrm{mmHg})=\mathrm{g}/(\mathrm{cm}\cdot\mathrm{s}^2\cdot\mathrm{mmHg})\) |
+| \(\rho^*=\rho/\texttt{MMHG\_TO\_DYNE}\) | \(\mathrm{mmHg}\cdot\mathrm{s}^2/\mathrm{cm}^2\) |
+| \((A/\rho^*)\partial_x p\) | \(\mathrm{cm}^2\big/(\mathrm{mmHg}\cdot\mathrm{s}^2/\mathrm{cm}^2)\cdot(\mathrm{mmHg/cm})=\mathrm{cm}^3/\mathrm{s}^2\) |
+
+与 \(\partial_t Q\) 的单位一致。波速 \(c=\sqrt{\beta\sqrt{A}/(2\rho^*)}\) 用同一 \(\rho^*\)，使 \(c\) 为 \(\mathrm{cm/s}\)。**摩擦项不使用 \(\rho^*\)**（已用运动粘度 \(\nu\) 归一化）。
 
 实现上：HLL/物理通量只处理对流部分 \(F\)；\(\partial_x p\) 在单元中心用中心差分（端点用单侧差分）离散。当 \(A\equiv A_0\) 时 \(p\equiv P_{\mathrm{ref}}\)，故 \(\partial_x p=0\)，静止平衡无虚假轴向力。
 
@@ -308,15 +350,17 @@ u = \frac{Q}{A}
 \[
 c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
 \qquad
-\rho^* = \frac{\rho}{1333.22}
+\rho^* = \frac{\rho}{\texttt{MMHG\_TO\_DYNE\_PER\_CM2}} = \frac{\rho}{1333.2}
 \]
+
+（\(\rho^*\) 定义与单位见 §3.1；默认约 \(7.951\times 10^{-4}\,\mathrm{mmHg}\cdot\mathrm{s}^2/\mathrm{cm}^2\)。）
 
 | 量 | 说明 |
 |----|------|
-| \(\beta(x)\) | 管壁刚度（mmHg/√cm）；\(\beta\) 越大 → 管壁越硬 → \(c\) 越大 |
+| \(\beta(x)\) | 管壁刚度（mmHg/cm；因 \(\beta(\sqrt{A}-\sqrt{A_0})\) 中 \(\sqrt{A}\) 为 cm）；\(\beta\) 越大 → 管壁越硬 → \(c\) 越大 |
 | \(A\) | 当前截面积（cm²） |
 | \(\rho\) | 血液密度（g/cm³，默认 1.06） |
-| \(\rho^*\) | 与 mmHg 制管腔压配对的**动量有效密度**（`momentum_rho()`） |
+| \(\rho^*\) | 与 mmHg 制管腔压配对的动量有效密度（`momentum_rho()`）；**单位不是** g/cm³ |
 
 物理上，\(c\) 刻画**压力扰动沿管轴传播**的快慢：顺应性越小（\(\beta\) 越大）或管腔越大，波速越高，CFL 对 \(\Delta t\) 的限制越严。
 
@@ -411,9 +455,8 @@ Q_{\mathrm{drive}} = Q(L)
 >    侧支分流标度，属于易错点。
 >
 > 现行做法：唯一出口模型为 RCR；需要二元行为时显式传
-> `outlet_r_proximal_mmhg_s_per_ml=0.0`（此时 `coupling_resistance()` 退化为
-> \(10^{-9}\) 下限，需注意该下限会让反解流量极大，因此**不建议**在压力驱动侧支上
-> 把 \(R_p\) 设为 0）。
+> `outlet_r_proximal_mmhg_s_per_ml=0.0`（构造时 \(R_p\) 会被钉到 \(10^{-9}\) 下限，
+> 反解流量会极大，因此**不建议**在压力驱动侧支上把 \(R_p\) 设为 0）。
 
 即 Windkessel ODE 由**特征相容后的出口流量** \(Q(L)\) 驱动，实现 0D–1D 质量闭合。这个 \(Q(L)\) 用到了从上游传到出口内侧的出射不变量，不是微循环出流 \(P_{\mathrm{wk}}/R_d\)。
 
@@ -467,7 +510,7 @@ Q_b = \frac{P_{\mathrm{ostium}} - P_{\mathrm{wk}}}{R_p},
 \]
 
 > 侧支反解阻力的“3wk 用 \(R_p\) / 2wk 用 \(R_d\)”分支已随二元模型一并移除：
-> 现在 \(R_{\mathrm{coup}} \equiv R_p\)（`coupling_resistance()` 只返回 \(R_p\)）。
+> 现在 \(R_{\mathrm{coup}} \equiv R_p\)（构造时已对 \(R_p,R_d\) 做 \(\ge 10^{-9}\) 下限）。
 > 这样侧支分流标度与出口管腔压定义 \(P_{\mathrm{lumen}} = P_{\mathrm{wk}} + R_p Q\)
 > 严格自洽。
 
@@ -515,7 +558,7 @@ flowchart LR
         WK["P_wk  ✓ ODE state"]
         OUT_P["P_lumen = f(P_wk, Q_drive)  ✓ prescribed"]
         OUT_Q["Q(L) 由 W+=u+4c 反解  ✓ compatibility"]
-        OUT_QV["Q_venous = P_wk/R_d  ◇ diagnostic"]
+        OUT_QV["P_wk/R_d 仅入 ODE，不向外返回"]
         OUT_A["A(L) = inv_tube_law(P_lumen)  derived"]
     end
 
@@ -749,11 +792,10 @@ NavierStokes1D(
 构造内还会：
 
 1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_cm`（全段一致，狭窄段**不**放大）
-2. `geometry.select_reference_indices` → 近/远端参考下标 `prox_idx`, `dist_idx`
-3. `geometry.detect_stenoses` → 自动检测狭窄段 `lesions`（仅用于诊断/绘图标注，不改 β）
-4. 近端段 \(x\le x_{\mathrm{prox}}\)、远端段 \(x\ge x_{\mathrm{dist}}\) 的 \(A_0\) 分别平整为参考点面积
-5. `outlet.reset(...)`；并更新 `p_ref_mmhg` 与出口稳态管腔压对齐
-6. \(A=A_0\)，\(Q=Q_{\mathrm{in}}(0)\)，刷新 `pressure`
+2. `geometry.build_stenosis_segment` → MLA + 近/远端参考（写入 `prox_idx`/`dist_idx`/`lesions`；仅诊断/绘图，不改 β）
+3. 近端段 \(x\le x_{\mathrm{prox}}\)、远端段 \(x\ge x_{\mathrm{dist}}\) 的 \(A_0\) 分别平整为参考点面积
+4. `outlet.reset(...)`；并更新 `p_ref_mmhg` 与出口稳态管腔压对齐
+5. \(A=A_0\)，\(Q=Q_{\mathrm{in}}(0)\)，刷新 `pressure`
 
 ### 7.2 由半径构造面积
 
@@ -767,8 +809,7 @@ solver = NavierStokes1D(area, L, par)
 
 | 步骤 | 函数 / 行为 |
 |------|-------------|
-| 近/远端参考 | `select_reference_indices`：前/后约 15% 区段内取面积最大（远端面积 ≤ 近端） |
-| 狭窄段 | `detect_stenoses`：近远端之间找 MLA，段宽约 \(\pm 5\%\,n_x\)，最多 3 段 |
+| MLA / 近远端参考 | `build_stenosis_segment`：排除首尾各 5 帧取 MLA；再在距 MLA ≤ 10 mm（整段 &lt; 10 mm 则不限）的近/远侧取面积最大帧；间距用求解器 `dx`；结果为一段 `StenosisSegment` |
 | \(\beta\) | **不随狭窄放大**，全段取常数 `beta_mmhg_per_cm` |
 
 > 说明：早期版本曾在狭窄 mask 上做 \(\beta \leftarrow \beta\cdot A_{0,\mathrm{prox}}/A_{0,\mathrm{MLA}}\)。
@@ -884,7 +925,7 @@ NavierStokes1D(
 | `x` | 节点坐标 (cm)，shape `(nx,)` |
 | `area_ref`, `beta` | 参考几何与刚度，shape `(nx,)` |
 | `prox_idx`, `dist_idx` | 近/远端参考下标 |
-| `lesions` | `geometry.detect_stenoses` 结果列表 |
+| `lesions` | `[build_stenosis_segment(...)]`（一段主狭窄） |
 | `state` | 守恒变量 `[A, Q]`，shape `(2, nx)` |
 | `pressure` | 沿程管腔标量压 \(p(x)\) (mmHg)，shape `(nx,)`；由 tube law 从 \(A\) 派生 |
 | `outlet` | `OutletWindkesselState` 实例 |
@@ -908,7 +949,7 @@ NavierStokes1D(
 结束时自动调用两个诊断并打印：
 
 - `print_pressure_diagnostics()` — 近/远端压力对照、是否出现 \(p_{\text{prox}}<p_{\text{dist}}\)（字段说明见 §9.4）
-- `print_wellposedness_diagnostics()` — Froude 数、特征线方向、临界流量、面积钳位（§9.6）
+- `print_wellposedness_diagnostics()` — 以 \(\lambda_\pm\) 判定亚/跨临界；附带临界流量、面积钳位（§9.6）
 
 ### 9.3 绘图
 
@@ -976,7 +1017,7 @@ NavierStokes1D(
 | `_stable_timestep(state)` | CFL 自适应时间步 |
 | `_ssp_rk2_step(dt)` | 单步 SSP-RK2 推进 |
 
-`OutletWindkesselState` 内部方法：`reset()`、`lumen_pressure()`、`coupling_resistance()`（恒取 \(R_p\)，用于由管腔压反解流量）、`flow_from_lumen_pressure()`、`outlet_flow_from_state()`、`apply_substep()` / `advance()`（流量驱动）、`apply_substep_from_pressure()` / `advance_from_pressure()`（压力驱动，用于侧支）。
+`OutletWindkesselState` 内部方法：`reset()`、`lumen_pressure()`、`flow_from_lumen_pressure()`（除以构造时已钉下限的 \(R_p\)）、`apply_substep()` / `advance()`（流量驱动，返回 \(P_{\mathrm{lumen}}\)；微循环项 \(P_{\mathrm{wk}}/R_d\) 仅出现在 ODE 右端）、`apply_substep_from_pressure()` / `advance_from_pressure()`（压力驱动，用于侧支）。\(R_p,R_d\) 在 `__init__` 一次性 `max(..., 1e-9)`。
 
 ### 9.6 适定性诊断（跨临界 / 壅塞 / 面积钳位）
 
@@ -1000,44 +1041,39 @@ c^2-\alpha u^2 & 2\alpha u
 
 #### 三种流态
 
+**判据用特征速度 \(\lambda_\pm\)**（公式见上；含默认 \(\alpha=1.1\)）。
+
 | 流态 | 判据 | 特征线方向 | 边界条件个数（入口/出口） |
 |------|------|------------|--------------------------|
-| **亚临界** | \(\lvert u\rvert < c\) | \(\lambda_-<0<\lambda_+\) | 1 / 1（各一个，适定） |
-| **临界** | \(\lvert u\rvert = c\)（\(\mathrm{Fr}=1\)） | \(\lambda_-=0\) | 喉部状态，需特别处理 |
-| **跨临界 / 壅塞** | \(\lvert u\rvert > c\) | \(\lambda_-\) **亦变号** | 入口 2 / 出口 0（**当前 BC 不适定**） |
+| **亚临界** | \(\lambda_-<0<\lambda_+\) | 信息双向 | 1 / 1（各一个，适定） |
+| **临界** | \(\lambda_-=0\) | 喉部驻点 | 喉部状态，需特别处理 |
+| **跨临界 / 壅塞** | \(\lambda_->0\) | 两特征同向 | 入口 2 / 出口 0（**当前 BC 不适定**） |
 
 > **物理含义**：跨临界时该处的两条特征线同向（都指向下游），出口的定压 Windkessel 条件与特征线方向矛盾。数值上会向上游反射虚假波，表现为狭窄段压力剧烈振荡、出现负压。这与喷管的气动壅塞（choking）同源。
 
-#### 三个可用判据（等价，推荐组合使用）
+#### 判据与辅助量
 
-**判据一：Froude 数**（最直观）
-
-\[
-\mathrm{Fr} = \frac{\lvert u\rvert}{c},\qquad \mathrm{Fr} > 1 \Rightarrow \text{跨临界}
-\]
-
-**判据二：特征线方向**（最本质，直接判定 BC 适定性）
+**主判据：特征线方向**（`wellposedness_diagnostics` 的 `transcritical` / `well_posed` / `n_choked` 均据此）
 
 \[
 \lambda_- = \alpha u - \sqrt{c^{2}+\alpha(\alpha-1)u^{2}} > 0
-\;\Rightarrow\; \text{该处出口 BC 无法施加}
+\;\Rightarrow\; \text{该处跨临界，出口 BC 无法正确施加}
 \]
 
-**判据三：临界流量**（工程上最易读）
+**辅助量：临界流量**（工程上好读，不替代 \(\lambda_-\)）
 
 \[
 Q_{\text{crit}}(x) = c(A)\,A
 \]
 
-即「该截面的声速流量上限」。比较实际流量峰值与 \(Q_{\text{crit}}\) 即可判断壅塞程度及需要削减多少流量。
+比较实际流量峰值与 \(Q_{\text{crit}}\) 可粗估壅塞程度；严格结论仍看 \(\lambda_-\)。
 
 #### 使用方法
 
 ```python
 solver.run(duration_s=3.0)
 # run() 结束时会自动打印（无需手动调用）：
-# [WP diag max over last 50%T] Fr_max=1.369 @ idx=92 (x=2.681 cm, c=452.2, u=620.6 cm/s)
-#   | lam- max=+184.7, lam+ min=+603.9
+# [WP diag max over last 50%T] lam- max=+184.7, lam+ min=+603.9 | worst λ₋ @ idx=92 (x=2.681 cm, ...)
 #   !! 跨临界/壅塞: 9 个节点 lambda- > 0，x ∈ [2.565, 2.798] cm ...
 #      该处 Q_crit = c·A = 3.913 mL/s，实际 Q_peak = 5.412 mL/s (超 1.38 倍)
 #   !! 面积钳位: 7681 个采样点触及 A/A0 = 0.80 下限 (1.9%) ...
@@ -1049,14 +1085,13 @@ stats = solver.wellposedness_diagnostics()   # 只取字典，不打印
 
 | 字段 | 含义 |
 |------|------|
-| `fr_max` | 全流域最大 Froude 数（用后 `1-warmup_fraction` 段数据） |
-| `transcritical` | 是否跨临界（`fr_max > 1`） |
-| `fr_worst_idx` / `fr_worst_x` | 最危险节点下标 / 位置 (cm) |
-| `n_choked` | \(\lambda_->0\) 的节点数；`0` 表示适定 |
-| `choked_x_min` / `choked_x_max` | 壅塞区 x 范围 (cm) |
 | `lam_minus_max` | 全流域 \(\lambda_-\) 最大值（**应 < 0**） |
 | `lam_plus_min` | 全流域 \(\lambda_+\) 最小值（**应 > 0**） |
-| `well_posed` | `n_choked == 0` 的布尔快捷判断 |
+| `n_choked` | \(\lambda_->0\) 的节点数；`0` 表示适定 |
+| `transcritical` | 是否跨临界（**`n_choked > 0`**） |
+| `well_posed` | `n_choked == 0` |
+| `worst_idx` / `worst_x` | \(\lambda_-\) 最危险节点下标 / 位置 (cm) |
+| `choked_x_min` / `choked_x_max` | 壅塞区 x 范围 (cm) |
 | `q_crit_worst` / `q_peak_worst` | 最危险处临界流量 / 实际峰值流量 (mL/s) |
 | `c_worst` / `u_worst` | 最危险处波速 / 流速 (cm/s) |
 | `n_clamp` / `clamp_fraction` | 触及 `0.8·A₀` 下限的采样点数 / 占比 |
@@ -1067,29 +1102,29 @@ CFL 用的是 \(\lambda_{\max}=\max(\lvert u\rvert+c)\)，只关心**数值稳�
 
 #### 诊断实例（本项目 `data/stenoses_data`，`nx=200`）
 
-| 驱动方式 | \(\mathrm{Fr}_{\max}\) | \(\lambda_-\) 最大值 | 壅塞节点数 | 结论 |
-|----------|------------------------|---------------------|-----------|------|
-| 定流量入口（当前默认） | **1.369** | **+184.7** | **9** | 跨临界，BC 不适定 |
-| 定压入口（见 §13） | **0.754** | < 0 | **0** | 亚临界，适定 |
+| 驱动方式 | \(\lambda_-\) 最大值 | 壅塞节点数 | 结论 |
+|----------|---------------------|-----------|------|
+| 定流量入口（当前默认） | **+184.7** | **9** | 跨临界，BC 不适定 |
+| 定压入口（见 §13） | < 0 | **0** | 亚临界，适定 |
 
 壅塞点定位（定流量算例，\(t=2.798\) s）：
 
-| idx | x (cm) | A/A₀ | c (cm/s) | u (cm/s) | Fr | 状态 |
-|-----|--------|------|----------|----------|-----|------|
-| 88 | 2.565 | 1.411 | — | — | 0.988 | 近临界 |
-| 89 | 2.594 | 1.268 | — | — | **1.104** | 跨临界 |
-| 92 | 2.681 | 0.836 | 452.2 | 620.6 | **1.369** | 峰值 |
-| 93 | 2.711 | **0.800** | — | — | 1.289 | 已触面积下限 |
+| idx | x (cm) | A/A₀ | c (cm/s) | u (cm/s) | 状态（按 \(\lambda_-\)） |
+|-----|--------|------|----------|----------|----------------------|
+| 88 | 2.565 | 1.411 | — | — | 近临界附近 |
+| 89 | 2.594 | 1.268 | — | — | \(\lambda_->0\) 跨临界 |
+| 92 | 2.681 | 0.836 | 452.2 | 620.6 | \(\lambda_-\) 最危险 |
+| 93 | 2.711 | **0.800** | — | — | 已触面积下限 |
 
 #### 回到亚临界的三种途径
 
 | 途径 | 改动 | 效果 |
 |------|------|------|
-| **改定压入口** | 入口 BC 由 \(Q_{\text{in}}(t)\) 改为 \(p_{\text{in}}(t)\) | 流量自动下降，\(\mathrm{Fr}_{\max}\to0.75\)，壅塞清零 |
+| **改定压入口** | 入口 BC 由 \(Q_{\text{in}}(t)\) 改为 \(p_{\text{in}}(t)\) | 流量自动下降，\(\lambda_-<0\) 处处成立，壅塞清零 |
 | 降低峰值流量 | 约需降 **28–34%**（\(Q_{\text{crit}}\approx3.6\text{–}3.9\) mL/s） | 治标，且改变生理工况 |
 | 加狭窄局部损失项 | \(\Delta p=K\rho Q^2/(2A^2)\) | 从机理上抑制喉部超速，可与定压入口组合 |
 
-> **关于面积钳位与跨临界的因果关系**：实测表明跨临界**先于**钳位发生（idx 89–92 的 \(\mathrm{Fr}>1\) 时钳位未生效），因此钳位是结果而非跨临界的成因。真实成因是**定流量入口把峰值流量强行压过过小的喉部截面**。
+> **关于面积钳位与跨临界的因果关系**：实测表明跨临界**先于**钳位发生（idx 89–92 已 \(\lambda_->0\) 时钳位未生效），因此钳位是结果而非跨临界的成因。真实成因是**定流量入口把峰值流量强行压过过小的喉部截面**。
 
 ---
 
@@ -1296,9 +1331,9 @@ def _apply_boundaries(self, state, advance=False):
 
     q_lumen = float(u[1, -1])
     if advance and self._outlet_dt > 0.0:
-        _, p_out = self.outlet.advance(self._outlet_dt, q_lumen)
+        p_out = self.outlet.advance(self._outlet_dt, q_lumen)
     else:
-        _, p_out = self.outlet.apply_substep(q_lumen)
+        p_out = self.outlet.apply_substep(q_lumen)
     u[0, -1] = area_from_lumen_pressure_mmhg(
         p_out, self.area_ref[-1], self.beta[-1], self.paras.p_ref_mmhg
     )
@@ -1321,7 +1356,7 @@ def _apply_boundaries(self, state, advance=False):
 | \(Q_{\text{in}}\) 均值 (mL/s) | 4.13 | 1.76 |
 | \(p(0)\) 均值 (mmHg) | **186.0** | **95.0** |
 | 瞬时 \(p\) 范围 (mmHg) | 30.7~249.4 | 33.2~116.6 |
-| \(\mathrm{Fr}_{\max}\) | **1.369** | **0.754** |
+| \(\lambda_-\) 最大值 | **+184.7** | < 0 |
 | 壅塞节点数 | **9** | **0** |
 | FFR（积分均值） | 0.589 | 0.613 |
 
@@ -1359,7 +1394,7 @@ A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等
 A：matplotlib：`MPLBACKEND=Agg` 后自行 `savefig`；Plotly：`plot_results_1(show=False)` 再 `fig.write_html(...)`。
 
 **Q：如何设置管腔面积？还有 `set_lumen_area_profile` 吗？**  
-A：**已删除**。请准备沿程 `area`（cm²），传入 `NavierStokes1D(area, L, par)`；节点数由 `len(area)` 决定。狭窄由 `geometry.detect_stenoses` 自动检测（仅用于诊断与绘图标注，**不**修改 \(\beta\)）。
+A：**已删除**。请准备沿程 `area`（cm²），传入 `NavierStokes1D(area, L, par)`；节点数由 `len(area)` 决定。狭窄由 `geometry.build_stenosis_segment` 自动检测（仅用于诊断与绘图标注，**不**修改 \(\beta\)）。
 
 **Q：为何初值用 \(Q_{\mathrm{in}}(0)\) 而非 \(Q_{\mathrm{mean}}\)？**  
 A：入口 BC 为 \(Q(0,t)=Q_{\mathrm{in}}(t)\)；\(t=0\) 时若管内初值与 BC 不一致会产生启动跳变。\(P_{\mathrm{wk}}\) 用 \(Q_{\mathrm{mean}} R_d\) 标定；构造末还会改写 `p_ref` 以对齐出口管腔压。
@@ -1371,13 +1406,13 @@ A：否。\(p\) 是各向同性**标量**管腔压（mmHg），`pressure[i]` 只
 A：\(P_{\mathrm{wk}}/R_d\) 是 Windkessel **微循环侧出流** \(Q_{\mathrm{venous}}\)，不是管腔出口流量。亚临界时 \(Q(L)\) 由出射不变量 \(W_+=u+4c\) 与 \(P_{\mathrm{lumen}}\) 联立得到。详见 [§5.2](#52-出口xlwindkessel-耦合)。
 
 **Q：运行日志里的 `[WP diag]` 是什么？出现「跨临界/壅塞」要紧吗？**  
-A：那是适定性诊断（§9.6）。**要紧**。它表示某处 \(\lvert u\rvert\ge c\)、\(\lambda_->0\)，出口定压边界条件与特征线方向矛盾，会反射虚假波（表现为压力振荡、负压）。此时结果不可用于定量分析。解决办法见 §9.6「回到亚临界的三种途径」。
+A：那是适定性诊断（§9.6）。**要紧**。权威信号是某处 \(\lambda_->0\)（两特征同向），出口定压边界条件与特征线方向矛盾，会反射虚假波。解决办法见 §9.6「回到亚临界的三种途径」。
 
 **Q：CFL 检查通过、仿真没崩，为什么还会跨临界？**  
-A：两者是不同的事。CFL 只保证数值稳定性（\(\Delta t \le \mathrm{CFL}\cdot\Delta x/\lambda_{\max}\)），**不保证物理适定性**。跨临界由流量与截面几何决定，必须用 §9.6 单独检查。
+A：两者是不同的事。CFL 只保证数值稳定性（\(\Delta t \le \mathrm{CFL}\cdot\Delta x/\lambda_{\max}\)），**不保证物理适定性**。跨临界由流量与截面几何决定，必须用 §9.6 单独检查（看 \(\lambda_-\)）。
 
-**Q：`Fr`、`u/c`、`Q_crit` 是同一件事吗？**  
-A：是同一判据的三种写法。\(\mathrm{Fr}=\lvert u\rvert/c\)；\(Q_{\text{crit}}=cA\) 是 \(\mathrm{Fr}=1\) 对应的流量。注意含 \(\alpha\) 修正的严格判据用 \(\lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}\)，跨临界区间会比简化的 \(\lvert u\rvert>c\) 略宽（本项目实测 9 个节点 vs 7 个）。
+**Q：`Q_crit` 与 \(\lambda_\pm\) 是什么关系？**  
+A：跨临界的判据是 \(\lambda_->0\)。\(Q_{\text{crit}}=cA\) 是辅助量，用于粗估当地流量相对弹性波速流量上限；`transcritical` / `well_posed` 由 `n_choked`（\(\lambda_->0\) 节点数）定义。
 
 **Q：能把参考压力 `p_ref` 绑到近端压力吗？**  
 A：**不能达到你认为的效果**。`p_ref` 只是 tube law 的零点，平移它会让整条压力曲线整体平移，而 \(A/Q\) 场**完全不变**（gauge 不变性）。且只改 `p_ref` 不同步平移出口 Windkessel 压力会算错出口面积。若要近端压力落在生理值，可外环标定 `q_scale`（→ §13.1）或改**入口驱动方式**（→ §13.2）。详见 `docs/边界条件分析报告.md`。
