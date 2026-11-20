@@ -140,11 +140,11 @@ def smooth_axial_area(
     将序列划分为三段（含端点）：
     ``[0, prox]``、``[prox, dist]``、``[dist, n-1]``。
 
-    - 近端段：在 ``[0, prox]`` 内取面积最大帧 ``id1``；``[0, id1]`` 常数填为
-      ``A[id1]``；``[id1, prox]`` 在 ``A[id1]`` 与 ``A[prox]`` 之间线性插值。
+    - 近端段：在 ``[0, prox)``（不含 prox）内取面积最大帧 ``id1``；``[0, id1]``
+      常数填为 ``A[id1]``；``[id1, prox]`` 在 ``A[id1]`` 与 ``A[prox]`` 之间线性插值。
     - 中间段：保持原始面积不变。
-    - 远端段：在 ``[dist, n-1]`` 内取面积最大帧 ``id2``；``[dist, id2]`` 在
-      ``A[dist]`` 与 ``A[id2]`` 之间线性插值；``[id2, n-1]`` 常数填为 ``A[id2]``。
+    - 远端段：在 ``(dist, n-1]``（不含 dist）内取面积最大帧 ``id2``；``[dist, id2]``
+      在 ``A[dist]`` 与 ``A[id2]`` 之间线性插值；``[id2, n-1]`` 常数填为 ``A[id2]``。
 
     最后对整段做 ``gaussian_filter1d(..., sigma=sigma_nodes, mode="nearest")``。
     """
@@ -164,26 +164,23 @@ def smooth_axial_area(
 
     out = a0.copy()
 
-    # ---- 近端 [0, prox] ----
-    id1 = int(np.argmax(a0[0 : prox + 1]))
-    a_id1 = float(a0[id1])
-    a_prox = float(a0[prox])
-    out[0 : id1 + 1] = a_id1
-    if prox > id1:
-        out[id1 : prox + 1] = np.linspace(a_id1, a_prox, prox - id1 + 1)
+    # ---- 近端：在 [0, prox) 搜最大 ⇒ id1 < prox，必做插值 ----
+    if prox > 0:
+        id1 = int(np.argmax(a0[0:prox]))
+        a_id1 = float(a0[id1])
+        a_prox = float(a0[prox])
+        out[0 : id1 + 1] = a_id1
+        x = np.arange(id1, prox + 1, dtype=float)
+        out[id1 : prox + 1] = np.interp(x, [id1, prox], [a_id1, a_prox])
 
-    # ---- 中间 [prox, dist]：保持原始 ----
-    out[prox : dist + 1] = a0[prox : dist + 1]
-
-    # ---- 远端 [dist, n-1] ----
-    id2 = dist + int(np.argmax(a0[dist:n]))
-    a_dist = float(a0[dist])
-    a_id2 = float(a0[id2])
-    if id2 > dist:
-        out[dist : id2 + 1] = np.linspace(a_dist, a_id2, id2 - dist + 1)
-    else:
-        out[dist] = a_dist
-    out[id2:n] = a_id2
+    # ---- 远端：在 (dist, n-1] 搜最大 ⇒ id2 > dist，必做插值 ----
+    if dist < n - 1:
+        id2 = dist + 1 + int(np.argmax(a0[dist + 1 : n]))
+        a_dist = float(a0[dist])
+        a_id2 = float(a0[id2])
+        x = np.arange(dist, id2 + 1, dtype=float)
+        out[dist : id2 + 1] = np.interp(x, [dist, id2], [a_dist, a_id2])
+        out[id2:n] = a_id2
 
     return gaussian_filter1d(out, sigma=float(sigma_nodes), mode="nearest")
 

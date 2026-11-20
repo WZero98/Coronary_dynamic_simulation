@@ -119,7 +119,9 @@ def prepare_side_branches(
     -------
     branches, distal_flow_fraction
     """
-    if branch_frame_indices is None or branch_diameters_cm is None:
+    if (branch_frame_indices is None or branch_diameters_cm is None or
+    len(branch_frame_indices) == 0 or len(branch_diameters_cm) == 0):
+        print(f"No side branches provided.")
         return [], 1.0
 
     idxs = [int(i) for i in branch_frame_indices]

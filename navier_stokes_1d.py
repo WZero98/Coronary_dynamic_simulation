@@ -679,8 +679,8 @@ class NavierStokes1D:
         # Murray 侧支：闭合直径 + 流量份额；远端主支终端份额 = distal_flow_fraction
         self.side_branches, self.distal_flow_fraction = prepare_side_branches(
             self.area_ref,
-            self.prox_idx,
-            self.dist_idx,
+            0,
+            self.nx - 1,
             branch_frame_indices,
             branch_diameters_cm,
             apply_murray_scale=apply_murray_scale,
@@ -1785,7 +1785,6 @@ def example(
     再在该 ``q_scale`` 下绘图并返回 FFR。
     """
     import joblib
-    from scipy.ndimage import gaussian_filter1d
     import os
     np.random.seed(2034)
     mm_per_pixel = (9.7 / 756)
@@ -1831,8 +1830,8 @@ def example(
         branch_diameters_cm=branch_d,
         duration_s=duration_s,
         record_interval_steps=30,
-        peak_lo_mmhg=90.0,
-        peak_hi_mmhg=105.0,
+        peak_lo_mmhg=95.0,
+        peak_hi_mmhg=130.0,
         max_iters=10,
         verbose=True,
         cache_dir=cache_dir,
