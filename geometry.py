@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -8,54 +8,184 @@ import numpy as np
 
 @dataclass
 class StenosisSegment:
-    """一段检测到的狭窄。"""
+    """一段检测到的狭窄（仅保留主 MLA 一段）。"""
 
-    mla_idx: int
-    i0: int
-    i1: int
-    area_cm2: float
+    prox_ref_idx: int  # 近端参考下标
+    dist_ref_idx: int  # 远端参考下标
+    mla_idx: int  # 最小管腔面积下标
+    prox_area_cm2: float  # 近端参考面积
+    dist_area_cm2: float  # 远端参考面积
+    mean_ref_area_cm2: float  # 近远端参考面积平均值
+    mla_area_cm2: float  # 最小管腔面积
 
 
+# 首尾各排除帧数（固定）；参考帧距 MLA 上限 10 mm = 1.0 cm
+_END_EXCLUDE_FRAMES = 5
+_MAX_REF_DISTANCE_CM = 1.0
 
-def select_reference_indices(
+
+def find_mla_index(
     areas: np.ndarray,
-    frac: float = 0.25
-) -> Tuple[int, int]:
-    """选择近/远端参考帧。
+    end_exclude: int = _END_EXCLUDE_FRAMES,
+) -> int:
+    """排除首尾各 ``end_exclude`` 帧后，取面积最小帧为 MLA。"""
+    a = np.asarray(areas, dtype=float).ravel()
+    n = int(a.shape[0])
+    if n <= 0:
+        raise ValueError("areas 为空")
+    if n == 1:
+        return 0
+    # 保证中间至少留 1 帧
+    exc = int(min(max(end_exclude, 0), max((n - 1) // 2, 0)))
+    if n - 2 * exc < 1:
+        exc = 0
+    i0 = exc
+    i1 = n - exc  # slice end (exclusive)
+    return int(i0 + np.argmin(a[i0:i1]))
 
-    - 近端：前 ``ref_end_fraction``（默认 25%）区段内面积最大帧；
-    - 远端：后 ``ref_end_fraction`` 区段内面积最大、且面积 ≤ 近端参考的帧；
-    - 保证 proximal_ref_idx < distal_ref_idx，且近端面积 ≥ 远端面积。
+
+def _vessel_length_cm(n: int, frame_spacing_cm: float) -> float:
+    if n <= 1:
+        return 0.0
+    return float(frame_spacing_cm) * float(n - 1)
+
+
+def _proximal_ref_index(
+    a: np.ndarray,
+    mla_idx: int,
+    frame_spacing_cm: float,
+    max_ref_distance_cm: float,
+) -> int:
+    """近端：在 MLA 近侧窗口内取面积最大帧；并列取距 MLA 最近（下标更大）。"""
+    n = int(a.shape[0])
+    if mla_idx <= 0:
+        return 0
+    L = _vessel_length_cm(n, frame_spacing_cm)
+    if L < max_ref_distance_cm - 1e-15:
+        lo = 0
+    else:
+        max_off = int(np.floor(max_ref_distance_cm / max(float(frame_spacing_cm), 1e-12)))
+        lo = max(0, mla_idx - max_off)
+    hi = mla_idx  # [lo, mla) ；不含 MLA
+    if hi <= lo:
+        return max(mla_idx - 1, 0)
+    region = a[lo:hi]
+    # 并列最大值取最后一个 → 距 MLA 最近
+    return int(lo + (len(region) - 1 - int(np.argmax(region[::-1]))))
+
+
+def _distal_ref_index(
+    a: np.ndarray,
+    mla_idx: int,
+    frame_spacing_cm: float,
+    max_ref_distance_cm: float,
+) -> int:
+    """远端：在 MLA 远侧窗口内取面积最大帧；并列取距 MLA 最近（下标更小）。"""
+    n = int(a.shape[0])
+    if mla_idx >= n - 1:
+        return n - 1
+    L = _vessel_length_cm(n, frame_spacing_cm)
+    if L < max_ref_distance_cm - 1e-15:
+        hi = n  # exclusive
+    else:
+        max_off = int(np.floor(max_ref_distance_cm / max(float(frame_spacing_cm), 1e-12)))
+        hi = min(n, mla_idx + 1 + max_off)
+    lo = mla_idx + 1  # (mla, hi)
+    if hi <= lo:
+        return min(mla_idx + 1, n - 1)
+    region = a[lo:hi]
+    # np.argmax 取第一个最大值 → 距 MLA 最近
+    return int(lo + int(np.argmax(region)))
+
+
+def build_stenosis_segment(
+    areas: np.ndarray,
+    *,
+    frame_spacing_cm: float = 0.02,
+    max_ref_distance_cm: float = _MAX_REF_DISTANCE_CM,
+    end_exclude: int = _END_EXCLUDE_FRAMES,
+) -> StenosisSegment:
+    """先定位 MLA，再在近/远端 ≤10 mm（或全段）内取面积最大帧为参考。"""
+    a = np.asarray(areas, dtype=float).ravel()
+    n = int(a.shape[0])
+    if n < 1:
+        raise ValueError("areas 为空")
+    dx = max(float(frame_spacing_cm), 1e-12)
+    mla_idx = find_mla_index(a, end_exclude=end_exclude)
+    prox_idx = _proximal_ref_index(a, mla_idx, dx, float(max_ref_distance_cm))
+    dist_idx = _distal_ref_index(a, mla_idx, dx, float(max_ref_distance_cm))
+    # 首尾各排除后 MLA 落在开区间，近/远侧窗口均不含 MLA ⇒ prox < mla < dist
+    prox_a = float(a[prox_idx])
+    dist_a = float(a[dist_idx])
+    mla_a = float(a[mla_idx])
+    return StenosisSegment(
+        prox_ref_idx=int(prox_idx),
+        dist_ref_idx=int(dist_idx),
+        mla_idx=int(mla_idx),
+        prox_area_cm2=prox_a,
+        dist_area_cm2=dist_a,
+        mean_ref_area_cm2=0.5 * (prox_a + dist_a),
+        mla_area_cm2=mla_a,
+    )
+
+
+def smooth_axial_area(
+    areas: np.ndarray,
+    stenosis_segment: StenosisSegment,
+    *,
+    sigma_nodes: float = 4.0,
+) -> np.ndarray:
+    """按狭窄近/远端参考分段重构管腔面积，再整段高斯平滑。
+
+    将序列划分为三段（含端点）：
+    ``[0, prox]``、``[prox, dist]``、``[dist, n-1]``。
+
+    - 近端段：在 ``[0, prox]`` 内取面积最大帧 ``id1``；``[0, id1]`` 常数填为
+      ``A[id1]``；``[id1, prox]`` 在 ``A[id1]`` 与 ``A[prox]`` 之间线性插值。
+    - 中间段：保持原始面积不变。
+    - 远端段：在 ``[dist, n-1]`` 内取面积最大帧 ``id2``；``[dist, id2]`` 在
+      ``A[dist]`` 与 ``A[id2]`` 之间线性插值；``[id2, n-1]`` 常数填为 ``A[id2]``。
+
+    最后对整段做 ``gaussian_filter1d(..., sigma=sigma_nodes, mode="nearest")``。
     """
-    a = np.asarray(areas, dtype=float)
-    n = len(a)
-    if n < 3:
-        return 0, max(n - 1, 0)
+    from scipy.ndimage import gaussian_filter1d
 
-    prox_end = max(int(np.ceil(frac * n)), 1)
-    dist_start = min(int(np.floor((1.0 - frac) * n)), n - 1)
-    if dist_start <= prox_end:
-        dist_start = min(prox_end + 1, n - 1)
+    a0 = np.asarray(areas, dtype=float).ravel()
+    n = int(a0.shape[0])
+    if n == 0:
+        return a0.copy()
 
-    prox_region = np.arange(0, prox_end)
-    prox_idx = int(prox_region[np.argmax(a[prox_region])])
+    prox = int(stenosis_segment.prox_ref_idx)
+    dist = int(stenosis_segment.dist_ref_idx)
+    if not (0 <= prox <= dist < n):
+        raise ValueError(
+            f"参考下标非法：prox={prox}, dist={dist}, n={n}"
+        )
 
-    dist_region = np.arange(dist_start, n)
-    dist_idx = int(dist_region[np.argmax(a[dist_region])])
+    out = a0.copy()
 
-    # 若远端面积更大，改为远端区最大且 ≤ 近端参考的帧
-    if a[dist_idx] > a[prox_idx] + 1e-9:
-        found = False
-        ordered = sorted(dist_region, key=lambda i: -a[i])
-        for i in ordered:
-            if a[i] <= a[prox_idx] + 1e-9:
-                dist_idx = int(i)
-                found = True
-                break
-        if not found:
-            print("The distal reference area is larger than the proximal reference area."
-            "Please check the input data.")
-    return prox_idx, dist_idx
+    # ---- 近端 [0, prox] ----
+    id1 = int(np.argmax(a0[0 : prox + 1]))
+    a_id1 = float(a0[id1])
+    a_prox = float(a0[prox])
+    out[0 : id1 + 1] = a_id1
+    if prox > id1:
+        out[id1 : prox + 1] = np.linspace(a_id1, a_prox, prox - id1 + 1)
+
+    # ---- 中间 [prox, dist]：保持原始 ----
+    out[prox : dist + 1] = a0[prox : dist + 1]
+
+    # ---- 远端 [dist, n-1] ----
+    id2 = dist + int(np.argmax(a0[dist:n]))
+    a_dist = float(a0[dist])
+    a_id2 = float(a0[id2])
+    if id2 > dist:
+        out[dist : id2 + 1] = np.linspace(a_dist, a_id2, id2 - dist + 1)
+    else:
+        out[dist] = a_dist
+    out[id2:n] = a_id2
+
+    return gaussian_filter1d(out, sigma=float(sigma_nodes), mode="nearest")
 
 
 def resample_axial_profile(
@@ -156,82 +286,9 @@ def resample_axial_profile(
     return area_new, L, nx_new, idxs_new, diams_new
 
 
-def detect_stenoses(
-    areas_cm2: np.ndarray,
-    proximal_ref_idx: int,
-    distal_ref_idx: int,
-) -> List[StenosisSegment]:
-    """在近远端参考之间检测最多 3 段狭窄。
-
-    规则：
-    1. 仅在开区间 (prox, dist) 内取全局最小面积为 MLA；
-    2. 该 MLA 必须严格小于两端参考面积，否则视为无狭窄（锥形/均匀管腔）；
-    3. 若次小值 A 满足 (A - MLA) ≤ 0.1 × MLA，且不落在已记录段 [i0, i1] 内，
-       则记为下一段狭窄；
-    4. 重复直至达到上限或不再满足条件。
-    """
-    a = np.asarray(areas_cm2, dtype=float)
-    n = len(a)
-    i_lo = int(proximal_ref_idx)
-    i_hi = int(distal_ref_idx)
-    if not (0 <= i_lo < n and 0 <= i_hi < n):
-        raise ValueError(
-            f"参考下标越界：prox={i_lo}, dist={i_hi}, n={n}"
-        )
-    if i_hi <= i_lo:
-        raise ValueError(
-            "The distal reference index is smaller than the proximal reference index."
-        )
-
-    half = max(int(0.05 * n), 5)
-    max_n = 3
-    tol = 0.1
-    a_ref = min(float(a[i_lo]), float(a[i_hi]))
-
-    # 只在 (i_lo, i_hi) 内搜索；已占用段置 +inf
-    work = a.copy()
-    work[: i_lo + 1] = np.inf
-    work[i_hi:] = np.inf
-
-    stenoses: List[StenosisSegment] = []
-    primary_mla_area: Optional[float] = None
-
-    for _ in range(max_n):
-        if not np.isfinite(work).any():
-            break
-        mla_idx = int(np.argmin(work))
-        mla_area = float(work[mla_idx])
-        if not np.isfinite(mla_area):
-            break
-
-        if primary_mla_area is None:
-            if mla_area >= a_ref - 1e-12:
-                break
-            primary_mla_area = mla_area
-        elif mla_area - primary_mla_area > tol * primary_mla_area + 1e-12:
-            break
-
-        i0 = max(i_lo, mla_idx - half)
-        i1 = min(i_hi, mla_idx + half)
-        if i1 <= i0:
-            break
-
-        stenoses.append(
-            StenosisSegment(
-                mla_idx=mla_idx,
-                i0=i0,
-                i1=i1,
-                area_cm2=mla_area,
-            )
-        )
-        work[i0 : i1 + 1] = np.inf
-
-    stenoses.sort(key=lambda s: s.mla_idx)
-    return stenoses
-
-
 if __name__ == "__main__":
     from scipy.ndimage import gaussian_filter1d
+
     area = np.array([
         0.08, 0.078, 0.079, 0.081, 0.082, 0.076, 0.077, 0.075, 0.074, 0.073,
         0.072, 0.071, 0.070, 0.069, 0.068, 0.067, 0.066, 0.065, 0.064, 0.063,
@@ -244,6 +301,7 @@ if __name__ == "__main__":
         0.0444, 0.0445, 0.0446, 0.0447, 0.0448, 0.0449, 0.0450, 0.0451, 0.0452, 0.0453,
         0.0454, 0.0455, 0.0456, 0.0457, 0.0458, 0.0459, 0.0460, 0.0461, 0.0462, 0.0463,
     ])
-    smoothed_area = gaussian_filter1d(area, sigma=4)
-    prox_idx, dist_idx = select_reference_indices(smoothed_area)
-    stenoses = detect_stenoses(smoothed_area, prox_idx, dist_idx)
+    seg = build_stenosis_segment(area, frame_spacing_cm=0.02)
+    area_s = smooth_axial_area(area, seg, sigma_nodes=4.0)
+    print(seg)
+    print(f"smooth: n={len(area_s)}, min={area_s.min():.4f}, max={area_s.max():.4f}")

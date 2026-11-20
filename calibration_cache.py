@@ -27,14 +27,8 @@ import numpy as np
 
 
 def stenosis_probe_index(solver: Any) -> int:
-    """狭窄探针：主狭窄 MLA；若无狭窄则取近远端之间面积最小点。"""
-    if solver.lesions:
-        return int(solver.lesions[0].mla_idx)
-    i0 = int(solver.prox_idx) + 1
-    i1 = int(solver.dist_idx)
-    if i1 <= i0:
-        return int(np.argmin(solver.area_ref))
-    return i0 + int(np.argmin(solver.area_ref[i0:i1]))
+    """狭窄探针：沿用构造时 ``build_stenosis_segment`` 得到的主 MLA。"""
+    return int(solver.lesions[0].mla_idx)
 
 
 def iteration_snapshot(

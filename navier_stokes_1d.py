@@ -56,7 +56,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 --------
 1. 管腔参考截面积 A₀（cm²，一维数组；节点数 n_x = len(A₀)）及血管长度 L
 2. BloodFlowParameters（物性、入口、出口 Windkessel）
-3. geometry.select_reference_indices / detect_stenoses（构造内自动调用）
+3. geometry.build_stenosis_segment（构造内自动调用：MLA + 近/远端参考）
 
 空间离散：单元中心有限体积法 + MUSCL 线性重构 + minmod TVD 限制器 + HLL 数值通量
 时间离散：SSP-RK2（二阶强稳定保持 Runge-Kutta）
@@ -78,7 +78,7 @@ from coronary_constants import (
     rho_for_mmhg_pressure_coupling,
 )
 from coronary_inlet import coronary_inlet_flow
-from geometry import detect_stenoses, select_reference_indices, resample_axial_profile
+from geometry import build_stenosis_segment, smooth_axial_area, resample_axial_profile
 
 
 # ---------------------------------------------------------------------------
@@ -180,21 +180,22 @@ def _muscl_states(
     return u_left, u_right
 
 
+def _c_prefactor(beta: float, rho_mmhg: float) -> float:
+    """c = γ A^{1/4}，γ = √(β / (2ρ*))。"""
+    return float(np.sqrt(float(beta) / (2.0 * float(rho_mmhg))))
+
+
 def _wave_speed(
     area: np.ndarray | float,
     beta: np.ndarray | float,
     rho_mmhg: float,
-) -> np.ndarray:
+) -> np.ndarray | float:
     """小扰动波速；p、β 均为 mmHg 制，ρ* 为动量耦合有效密度。"""
     b = np.asarray(beta, dtype=float)
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     # c² = (A/ρ*)·dp/dA，tube law 下 dp/dA = β/(2√A) → c = √(β√A/(2ρ*))
-    return np.sqrt(b * np.sqrt(a) / (2.0 * rho_mmhg))
-
-
-def _c_prefactor(beta: float, rho_mmhg: float) -> float:
-    """c = γ A^{1/4}，γ = √(β / (2ρ*))。"""
-    return float(np.sqrt(float(beta) / (2.0 * float(rho_mmhg))))
+    # β 可为标量或与 A 同形的数组，故不用 _c_prefactor（仅标量）
+    return np.sqrt(b / (2.0 * float(rho_mmhg))) * (a ** 0.25)
 
 
 def _characteristic_speeds(
@@ -225,7 +226,7 @@ def _riemann_invariants(
     """
     a = max(float(area), 1e-12)
     u = float(flow) / a
-    c = _c_prefactor(beta, rho_mmhg) * a**0.25
+    c = float(_wave_speed(a, float(beta), rho_mmhg))
     return u + 4.0 * c, u - 4.0 * c
 
 
@@ -301,11 +302,11 @@ def _outlet_flow_from_w_plus(
     a0 = float(area_ref)
     beta_f = float(beta)
     p_ref_f = float(p_ref)
-    r_d_f = max(float(r_d), 1e-9)
+    r_d_f = float(r_d)  # 调用方传入已在 OutletWindkesselState 初始化时钉下限
+    r_p_f = float(r_p)
     c_wk = max(float(compliance), 1e-9)
     dt_f = max(float(dt), 0.0)
     p_wk_f = float(p_wk)
-    r_p_f = float(r_p)
 
     def p_lumen(q: float) -> float:
         p_node = p_wk_f
@@ -357,9 +358,6 @@ def _flux_vector(
     alpha: float,
 ) -> np.ndarray:
     """物理通量 F(U)：质量通量 Q，动量通量仅对流项 α Q²/A。
-
-    压力梯度不以 pA/ρ* 进入通量（旧错误写法），而由空间算子中的
-    −(A/ρ*) ∂p/∂x 源项施加，与标准 1D 血流方程一致。
     """
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     q = np.asarray(flow, dtype=float)
@@ -524,8 +522,9 @@ class OutletWindkesselState:
         share = max(float(flow_share), 1e-6)
         self.flow_share = share
         r_d0, r_p0 = params.resolve_outlet_resistances()
-        self.r_d = r_d0 / share
-        self.r_p = r_p0 / share
+        # 阻力下限一次钉死，后续除法不再反复 max(..., 1e-9)
+        self.r_d = max(float(r_d0) / share, 1e-9)
+        self.r_p = max(float(r_p0) / share, 1e-9)
         self.c = max(params.outlet_compliance_ml_per_mmhg * share, 1e-9)
 
     def reset(
@@ -546,50 +545,42 @@ class OutletWindkesselState:
         """出口/开口管腔压：P_lumen = P_wk + R_p·Q_drive。"""
         return self.p_wk + self.r_p * float(q_drive)
 
-    def coupling_resistance(self) -> float:
-        """由管腔压反解流量时的串联阻力：RCR 串联近端阻力 R_p。"""
-        return max(self.r_p, 1e-9)
-
     def flow_from_lumen_pressure(self, p_lumen: float) -> float:
         """给定开口/出口管腔压，反解进入 Windkessel 的流量 Q_drive。
 
         Q = (P_lumen − P_wk) / R_p
         """
-        return (float(p_lumen) - self.p_wk) / self.coupling_resistance()
+        return (float(p_lumen) - self.p_wk) / self.r_p
 
-    def outlet_flow_from_state(self) -> float:
-        """微循环侧出流 Q_venous = P_wk/R_d。"""
-        return self.p_wk / max(self.r_d, 1e-9)
-
-    def apply_substep(self, q_lumen: float) -> tuple[float, float]:
-        """SSP-RK 子步（流量驱动）：冻结 P_wk，返回 (Q_venous, P_lumen)。"""
+    def apply_substep(self, q_lumen: float) -> float:
+        """SSP-RK 子步（流量驱动）：冻结 P_wk，返回 P_lumen。"""
         q_drive = float(q_lumen)
-        return self.outlet_flow_from_state(), self.lumen_pressure(q_drive)
+        self.p_lumen = self.lumen_pressure(q_drive)
+        return self.p_lumen
 
-    def advance(self, dt: float, q_lumen: float) -> tuple[float, float]:
-        """完整时间步末（流量驱动）：C·dP_wk/dt = Q_drive − P_wk/R_d。"""
+    def advance(self, dt: float, q_lumen: float) -> float:
+        """完整时间步末（流量驱动）：C·dP_wk/dt = Q_drive − P_wk/R_d，返回 P_lumen。
+
+        微循环出流 P_wk/R_d 仅出现在本 ODE 右端，不单独向外返回。
+        """
         if dt <= 0.0:
             return self.apply_substep(q_lumen)
         q_drive = float(q_lumen)
-        self.p_wk += (dt / self.c) * (
-            q_drive - self.p_wk / max(self.r_d, 1e-9)
-        )
+        self.p_wk += (dt / self.c) * (q_drive - self.p_wk / self.r_d)
         self.p_lumen = self.lumen_pressure(q_drive)
-        return self.outlet_flow_from_state(), self.p_lumen
+        return self.p_lumen
 
     def apply_substep_from_pressure(self, p_lumen: float) -> float:
-        """SSP-RK 子步（压力驱动）：冻结 P_wk，返回 Q_drive。"""
+        """SSP-RK 子步（压力驱动）：冻结 P_wk，返回 Q_drive，用于计算分支分流量"""
         q_drive = self.flow_from_lumen_pressure(p_lumen)
         self.p_lumen = float(p_lumen)
         return q_drive
 
     def advance_from_pressure(self, dt: float, p_lumen: float) -> float:
-        """完整时间步末（压力驱动）：由 P_lumen 得 Q，再推进 P_wk。"""
+        """完整时间步末（压力驱动）：由 P_lumen 得 Q，再推进 P_wk，用于计算分支分流量"""
         q_drive = self.flow_from_lumen_pressure(p_lumen)
         if dt > 0.0:
-            self.p_wk += (dt / self.c) * (
-                q_drive - self.p_wk / max(self.r_d, 1e-9)
-            )
+            self.p_wk += (dt / self.c) * (q_drive - self.p_wk / self.r_d)
             # 推进后用新 P_wk 与同一 P_lumen 再一致化一次 Q
             q_drive = self.flow_from_lumen_pressure(p_lumen)
         self.p_lumen = float(p_lumen)
@@ -622,7 +613,9 @@ class NavierStokes1D:
         apply_murray_scale: bool = True,
         align_p_ref_to_outlet: bool = True,
     ):
-        self.area_ref = np.asarray(area_cm2, dtype=float).ravel()
+        self.raw_area = np.asarray(area_cm2, dtype=float).ravel()
+        self.area_ref = self.raw_area.copy()
+        self.area_ref = np.maximum(self.area_ref, 1e-8)
         self.nx = int(self.area_ref.shape[0])
         if self.nx < 3:
             raise ValueError(f"area 长度至少为 3，当前为 {self.nx}")
@@ -635,7 +628,7 @@ class NavierStokes1D:
         self.beta = np.full(self.nx, float(self.paras.beta_mmhg_per_cm), dtype=float)
         self.state = np.zeros((2, self.nx))
         self.pressure = np.zeros(self.nx)
-
+        
         self.time = 0.0
         self._outlet_dt = 0.0
 
@@ -646,23 +639,22 @@ class NavierStokes1D:
         self.history_pressure: np.ndarray | None = None  # (n_save, nx) 管腔压 p (mmHg)
         self.history_branch_flow: np.ndarray | None = None  # (n_save, n_branch) 侧支出流 Q_b
 
-        self.area_ref = np.maximum(self.area_ref, 1e-8)
-
         # #######其它状态初值设置#######
         # 狭窄检测（仅用于诊断与绘图标注；不修改 β）
-        # 注：曾在此处按 A0(prox)/A0(MLA) 放大狭窄段 β，实测会使 tube law
-        # 对 A 的数值误差产生上百 mmHg 的放大（狭窄段出现负压/压力尖峰），
-        # 故已移除。β 保持 paras.beta_mmhg_per_cm 的常数值。
-        self.prox_idx, self.dist_idx = select_reference_indices(self.area_ref)
-        self.lesions = detect_stenoses(self.area_ref, self.prox_idx, self.dist_idx)
-        if self.lesions:
-            print(f"Detect {len(self.lesions)} stenoses.")
+        # β 保持 paras.beta_mmhg_per_cm 的常数值。
+        sten = build_stenosis_segment(self.area_ref, frame_spacing_cm=self.dx)
+        self.prox_idx = int(sten.prox_ref_idx)
+        self.dist_idx = int(sten.dist_ref_idx)
+        self.lesions = [sten]
+        print(
+            f"Detect stenosis: MLA@{sten.mla_idx} "
+            f"(A={sten.mla_area_cm2:.4f} cm²), "
+            f"prox_ref@{sten.prox_ref_idx}, dist_ref@{sten.dist_ref_idx}"
+        )
 
         # 近/远端参考段平整
-        prox_mask = self.x <= self.x[self.prox_idx]
-        dist_mask = self.x >= self.x[self.dist_idx]
-        self.area_ref[prox_mask] = self.area_ref[self.prox_idx]
-        self.area_ref[dist_mask] = self.area_ref[self.dist_idx]
+        smooth_area = smooth_axial_area(self.area_ref, sten)
+        self.area_ref= smooth_area
 
         # 舍去近/远端参考段以外的侧支（只保留 prox_idx ≤ i ≤ dist_idx）
         if branch_frame_indices is not None and branch_diameters_cm is not None:
@@ -739,8 +731,7 @@ class NavierStokes1D:
         # 侧支：按 P≈p_ref 时 Q_b≈Murray 份额初始化 P_wk，便于起步
         for br, wk in zip(self.side_branches, self.branch_outlets):
             q_share = q_mean * br.flow_fraction
-            r_coup = wk.coupling_resistance()
-            wk.reset(p_wk=p_ref - r_coup * q_share, q_drive=q_share)
+            wk.reset(p_wk=p_ref - wk.r_p * q_share, q_drive=q_share)
 
         self.state[0] = self.area_ref.copy()
         self.state[1] = self._main_flow_profile(q0)
@@ -936,9 +927,9 @@ class NavierStokes1D:
                 used_characteristic = True
 
         if advance and self._outlet_dt > 0.0:
-            _, p_out = self.outlet.advance(self._outlet_dt, q_drive)
+            p_out = self.outlet.advance(self._outlet_dt, q_drive)
         else:
-            _, p_out = self.outlet.apply_substep(q_drive)
+            p_out = self.outlet.apply_substep(q_drive)
         u[0, -1] = float(
             np.asarray(
                 area_from_lumen_pressure_mmhg(
@@ -1133,7 +1124,7 @@ class NavierStokes1D:
     def wellposedness_diagnostics(
         self, warmup_fraction: float = 0.5
     ) -> dict[str, float]:
-        """适定性诊断：Froude 数、特征线方向、临界流量、面积钳位。
+        """适定性诊断：以特征速度 λ± 判定亚/跨临界；并报告临界流量与面积钳位。
 
         一维双曲系统 ``U = [A, Q]`` 的系数矩阵
         ``[[0, 1], [c² − αu², 2αu]]`` 给出两条特征速度
@@ -1142,12 +1133,11 @@ class NavierStokes1D:
 
         其中 ``u = Q/A``，``c = √(β√A/(2ρ*))``（见 :func:`_wave_speed`）。
 
-        判据
-        ----
-        - **亚临界** ``|u| < c``：``λ₋ < 0 < λ₊``，入口/出口各需 1 个边界条件
-        - **临界** ``|u| = c``（``Fr = 1``）：喉部状态
-        - **跨临界/壅塞** ``|u| > c``：``λ₋`` 亦变号，两个特征线同向，
-          出口的定压 Windkessel 条件与特征线方向矛盾，会反射虚假波
+        判据（含 α≠1）
+        ----------------
+        - **亚临界**：处处 ``λ₋ < 0 < λ₊``（本函数用后段时间上 ``λ₋`` 最大值 ≤ 0）
+        - **跨临界/壅塞**：某处 ``λ₋ > 0``，两特征同向，出口定压 BC 不适定
+        - ``transcritical`` / ``well_posed`` / ``n_choked`` 均由 ``λ₋`` 定义
 
         Parameters
         ----------
@@ -1157,9 +1147,8 @@ class NavierStokes1D:
         Returns
         -------
         dict
-            ``fr_max`` 全流域最大 Froude 数；``transcritical`` 是否跨临界；
-            ``n_choked`` ``λ₋ > 0`` 的节点数；``lam_minus_max`` 全流域
-            ``λ₋`` 最大值（应 < 0）；``n_clamp`` 面积钳位采样点数等。
+            ``transcritical`` / ``well_posed`` / ``n_choked`` / ``lam_minus_max`` /
+            ``worst_idx`` / ``worst_x`` 等。
         """
         rho_star = rho_for_mmhg_pressure_coupling(self.paras.rho)
         alpha = float(self.paras.alpha)
@@ -1180,19 +1169,14 @@ class NavierStokes1D:
         lam_p = alpha * u + disc
         lam_m = alpha * u - disc
 
-        fr = np.abs(u) / np.maximum(c, 1e-12)
-        fr_space = fr.max(axis=0)
-        fr_max = float(fr_space.max())
-        i_worst = int(np.argmax(fr_space))
-
         # λ₋ > 0 ⇒ 该处两特征线同向，出口 BC 无法施加
         lam_m_space = lam_m.max(axis=0)
         bad = np.where(lam_m_space > 0.0)[0]
         n_choked = int(bad.size)
         lam_minus_max = float(lam_m_space.max())
         lam_plus_min = float(lam_p.min())
+        i_worst = int(np.argmax(lam_m_space))
 
-        # 临界流量 Q_crit = c·A（Fr = 1 对应的流量）
         q_crit = float(np.mean(c * a, axis=0)[i_worst])
         q_peak = float(q.max(axis=0)[i_worst])
 
@@ -1202,10 +1186,9 @@ class NavierStokes1D:
         clamp_frac = float((ratio <= MINIMUM_AREA_RATIO + 1e-6).mean())
 
         return {
-            "fr_max": fr_max,
-            "fr_worst_idx": float(i_worst),
-            "fr_worst_x": float(self.x[i_worst]),
-            "transcritical": bool(fr_max > 1.0),
+            "worst_idx": float(i_worst),
+            "worst_x": float(self.x[i_worst]),
+            "transcritical": bool(n_choked > 0),
             "n_choked": float(n_choked),
             "choked_x_min": float(self.x[bad].min()) if n_choked else float("nan"),
             "choked_x_max": float(self.x[bad].max()) if n_choked else float("nan"),
@@ -1228,12 +1211,12 @@ class NavierStokes1D:
         tag = "instant" if self.history_time is None else (
             f"max over last {1.0 - warmup_fraction:.0%}T"
         )
-        iw = int(s["fr_worst_idx"])
+        iw = int(s["worst_idx"])
         print(
-            f"[WP diag {tag}] Fr_max={s['fr_max']:.3f} @ idx={iw} "
-            f"(x={s['fr_worst_x']:.3f} cm, c={s['c_worst']:.1f}, "
-            f"u={s['u_worst']:.1f} cm/s) | "
-            f"lam- max={s['lam_minus_max']:+.1f}, lam+ min={s['lam_plus_min']:+.1f}"
+            f"[WP diag {tag}] lam- max={s['lam_minus_max']:+.1f}, "
+            f"lam+ min={s['lam_plus_min']:+.1f} | "
+            f"worst λ₋ @ idx={iw} (x={s['worst_x']:.3f} cm, "
+            f"c={s['c_worst']:.1f}, u={s['u_worst']:.1f} cm/s)"
         )
         if s["well_posed"]:
             print(
@@ -1562,89 +1545,19 @@ def run_uniform_tube_mass_check(
     )
     solver.run(duration_s=duration_s, record_interval_steps=8, verbose=verbose)
     report = solver.mass_balance(cycle_s=60.0 / paras.heart_rate_bpm)
-    report["fr_max"] = float(solver.wellposedness_diagnostics(
+    wp = solver.wellposedness_diagnostics(
         warmup_fraction=max(0.0, 1.0 - (60.0 / paras.heart_rate_bpm) / duration_s)
-    )["fr_max"])
+    )
+    report["lam_minus_max"] = float(wp["lam_minus_max"])
+    report["n_choked"] = float(wp["n_choked"])
     report["n_lesion"] = float(len(solver.lesions))
     report["n_branch"] = float(len(solver.side_branches))
     print(
         f"[uniform tube] Q_in={report['q_in']:.6f} Q_out={report['q_out']:.6f} "
         f"mass_err={report['mass_err']:.3e} dV/dt={report['dvdt']:.3e} "
-        f"Fr_max={report['fr_max']:.4f}"
+        f"lam- max={report['lam_minus_max']:+.4f}, n_choked={int(report['n_choked'])}"
     )
     return report
-
-
-def demo():
-    from scipy.ndimage import gaussian_filter1d
-    import os
-
-    name = 'case3'
-    dirname = f"D:/WPY/Projects/FFR_test/output/lumen_area/{name}"
-    np.random.seed(2034)
-    sigma_nodes = 4
-    duration_s = 3.0
-
-    # 原始 npy：面积为 mm²，直径为 mm，读入后一律换成 cm / cm²
-    area_file = np.load(os.path.join(dirname, "area.npy"))
-    area = area_file[::-1] / 100.0  # mm² → cm²
-    area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
-    
-    is_branch = np.load(os.path.join(dirname, "is_branch.npy"))[::-1]
-    branch_d_cm = np.load(os.path.join(dirname, "branch_diameter.npy"))[::-1] / 10.0  # mm → cm
-
-    # 按参考点重新设置长度
-    # area_smooth = area_smooth[:200]
-    # is_branch = is_branch[:200]
-    # branch_d_cm = branch_d_cm[:200]
-
-    nx = area_smooth.shape[0]
-    length = 0.02 * nx  
-    print(nx, length)
-
-    prox_idx, dist_idx = select_reference_indices(area_smooth)
-    branch_idx = np.where(is_branch > 0)[0]
-    merged_idx: list[int] = []
-    merged_d: list[float] = []
-    for i in branch_idx:
-        if i < prox_idx or i > dist_idx:
-            continue
-        if merged_idx and i - merged_idx[-1] <= 3:
-            if float(branch_d_cm[i]) > merged_d[-1]:
-                merged_idx[-1] = int(i)
-                merged_d[-1] = float(branch_d_cm[i])
-        else:
-            merged_idx.append(int(i))
-            merged_d.append(float(branch_d_cm[i]))
-
-    parameters = BloodFlowParameters()
-    solver = NavierStokes1D(
-        area_smooth,
-        length,
-        parameters,
-        branch_frame_indices=merged_idx,
-        branch_diameters_cm=merged_d,
-        # 默认 apply_murray_scale=True、align_p_ref_to_outlet=True
-    )
-    solver.run(duration_s=duration_s, record_interval_steps=30)
-    solver.plot_results_1(title=name)
-
-    assert solver.history_time is not None
-    assert solver.history_flow is not None
-    assert solver.history_pressure is not None
-
-    q_in = np.mean(solver.history_flow[:, 0])
-    q_out = np.mean(solver.history_flow[:, -1])
-    q_side = (
-        float(np.mean(np.sum(solver.history_branch_flow, axis=1)))
-        if solver.history_branch_flow is not None and solver.history_branch_flow.size
-        else 0.0
-    )
-    print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, Q_side_sum={q_side:.3f}")
-    print(f"mass check: Q_in ≈ Q_out+Q_side → {q_in:.3f} vs {q_out + q_side:.3f}")
-
-    ffr = solver.ffr_ratio()
-    return ffr
 
 
 def roi_process(roi_idx, area, branch_idx, branch_d):
@@ -1768,7 +1681,7 @@ def calibrate_q_scale_to_inlet_peak(
     target = 0.5 * (float(peak_lo_mmhg) + float(peak_hi_mmhg))
     history: list[dict] = []
     best_solver: NavierStokes1D | None = None
-    best_score = float("inf")
+    best_loss = float("inf")
     best_rec: dict | None = None
 
     if verbose:
@@ -1811,17 +1724,18 @@ def calibrate_q_scale_to_inlet_peak(
         solver.run(
             duration_s=duration_s,
             record_interval_steps=record_interval_steps,
-            verbose=False,
+            verbose=True,
         )
         peak = inlet_pressure_peak_mmhg(solver)
         in_range = bool(peak_lo_mmhg < peak < peak_hi_mmhg)
+        # loss：距目标窗的偏差（越小越好）；窗内为 0，另加中心偏置作并列打破
         if in_range:
-            score = 0.0
+            loss = 0.0
         elif peak >= peak_hi_mmhg:
-            score = peak - peak_hi_mmhg
+            loss = peak - peak_hi_mmhg
         else:
-            score = peak_lo_mmhg - peak
-        score = float(score) + 1e-3 * abs(peak - target)
+            loss = peak_lo_mmhg - peak
+        loss = float(loss) + 1e-3 * abs(peak - target)
 
         snap = iteration_snapshot(solver, it, q, peak, in_range)
         history.append(snap)
@@ -1832,8 +1746,8 @@ def calibrate_q_scale_to_inlet_peak(
                 + ("  [OK]" if in_range else "")
             )
 
-        if score < best_score:
-            best_score = score
+        if loss < best_loss:
+            best_loss = loss
             best_solver = solver
             best_rec = snap
 
@@ -1880,9 +1794,7 @@ def example(
     # 原始 npy：面积为 pixel²，直径为 pixel，读入后一律换成 cm / cm²
     area_file = joblib.load(os.path.join(dirname, "areas.joblib"))
     area = np.array(area_file)[::-1] * (mm_per_pixel**2) / 100.0  # mm² → cm²
-    area_smooth = gaussian_filter1d(area, sigma=sigma_nodes, mode="nearest")
-
-    nx = area_smooth.shape[0]
+    nx = area.shape[0]
     print(f"raw nx={nx}")
 
     # 分支信息（与 area 同向：近端→远端）
@@ -1896,8 +1808,8 @@ def example(
     # area_smooth, branch_idx, branch_d = roi_process(roi_idx, area_smooth, branch_idx, branch_d)
 
     # 轴向重采样：降低 nx 以加速；物理长度保持 frame_spacing_cm * nx_raw
-    area_smooth, length, nx, branch_idx, branch_d = resample_axial_profile(
-        area_smooth,
+    area, length, nx, branch_idx, branch_d = resample_axial_profile(
+        area,
         target_nx=target_nx,
         branch_frame_indices=branch_idx,
         branch_diameters_cm=branch_d,
@@ -1912,7 +1824,7 @@ def example(
         f"q_scale_cal_{name}_nx{nx}_T{duration_s:.2f}",
     )
     solver, cal = calibrate_q_scale_to_inlet_peak(
-        area_smooth,
+        area,
         length,
         parameters,
         branch_frame_indices=branch_idx,
@@ -1963,7 +1875,6 @@ def example(
 
 
 if __name__ == "__main__":
-    # ffr = demo()
     # target_nx=100 降采样；改为 None 可跑原始分辨率对比准确率
     ffr = example(target_nx=200, name="stenoses")
     print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")
