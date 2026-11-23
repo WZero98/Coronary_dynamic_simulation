@@ -47,9 +47,10 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 ------------------------------------
 - A(x,0) = A₀(x)（经近/远端参考段平整；β 全段取常数，不随狭窄放大）
 - Q(x,0) 按 Murray 份额沿程分流剖面
-- 主支远端 P_wk(0) = Q_mean·f_distal·R_d
-- 3wk（默认且唯一）将 p_ref 对齐到出口稳态管腔压 P_wk+R_p·Q_mean·f_distal，
-  使 A=A₀ 时 tube law 与出口 Windkessel 压位一致
+- 主支远端 P_wk(0) = Q_mean·f_distal·R_d（R 已按份额放大）
+- 构造各终端 Windkessel 之前，用未缩放的 R_d、R_p 与 Q_mean 将 p_ref
+  写成 Q_mean·(R_d+R_p)，使 A=A₀ 时 tube law 与出口稳态管腔压一致。
+  该对齐不可关闭：用已按 1/份额放大的出口阻力来反推 p_ref 会把份额混进去
 - 侧支默认 apply_murray_scale=True（Murray 闭合）；并校验直径单位/是否大于主支
 
 主要输入
@@ -58,7 +59,7 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 2. BloodFlowParameters（物性、入口、出口 Windkessel）
 3. geometry.build_stenosis_segment（构造内自动调用：MLA + 近/远端参考）
 
-空间离散：单元中心有限体积法 + MUSCL 线性重构 + minmod TVD 限制器 + HLL 数值通量
+空间离散：单元中心有限体积法 + MUSCL 线性重构 + MC（monotonized central）TVD 限制器 + HLL 数值通量
 时间离散：SSP-RK2（二阶强稳定保持 Runge-Kutta）
 时间步长：CFL 自适应
 """
@@ -152,13 +153,21 @@ def integral_mean(y: np.ndarray | Sequence[float], x: np.ndarray | Sequence[floa
 # ---------------------------------------------------------------------------
 # TVD / MUSCL / HLL
 # ---------------------------------------------------------------------------
-def _minmod(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """minmod 限制器。
-    对于从左、右边界计算的斜率a, b, 符号一致则取绝对值更小的；符号不一致则取 0。
+def _minmod(slope_central_difference: np.ndarray, slope_l: np.ndarray, slope_r: np.ndarray) -> np.ndarray:
+    """van Leer 的 MC (Monotonized Central) 限制器。
+    将中心差分斜率与两侧的单侧斜率放入 minmod 函数中取限制值。
+    若 a,b,c 同号，则取绝对值最小者并保留符号；否则取零。
     """
-    signs = a * b
-    signs = np.where(signs > 0, 1, 0)
-    return signs * np.minimum(np.abs(a), np.abs(b))
+    # 三者同正
+    signs_all_positive = np.where(slope_central_difference > 0, 1, 0) * np.where(slope_l > 0, 1, 0) * np.where(slope_r > 0, 1, 0)
+    # 三者同负
+    signs_all_negative = np.where(slope_central_difference < 0, 1, 0) * np.where(slope_l < 0, 1, 0) * np.where(slope_r < 0, 1, 0)
+    
+    # 绝对值最小
+    abs_min = np.minimum(np.abs(slope_central_difference), np.minimum(2 * np.abs(slope_l), 2 * np.abs(slope_r)))
+    result = (signs_all_positive * abs_min
+    + (-signs_all_negative) * abs_min)
+    return result
 
 
 def _muscl_states(
@@ -169,20 +178,18 @@ def _muscl_states(
     nvar, nx = U.shape  # nvar 为未知函数量，nx 为划分单元数
     slope = np.zeros_like(U)
     if nx >= 3:
-        slope[:, 1:-1] = _minmod(U[:, 1:-1] - U[:, :-2], U[:, 2:] - U[:, 1:-1])
+        slope_central_difference = (U[:, 2:] - U[:, :-2]) * 0.5  # dx直接约去，范围 [1, nx-2]，无第0, nx-1 (首尾两单元)
+        slope_left = U[:, 1:-1] - U[:, :-2]  # dx直接约去，范围 [1, nx-2]，无第0, nx-1 (首尾两单元)
+        slope_right = U[:, 2:] - U[:, 1:-1]  # dx直接约去，范围 [1, nx-2]，无第0, nx-1 (首尾两单元)
+        slope[:, 1:-1] = _minmod(slope_central_difference, slope_left, slope_right)
     # 左状态计算，来自当前单元
-    u_left = U[:, :-1] + 0.5 * slope[:, :-1]
+    u_left = U[:, :-1] + 0.5 * slope[:, :-1]  # 共 nx-1 个
     # 右状态计算，来自下一个单元
-    u_right = U[:, 1:] - 0.5 * slope[:, 1:]
+    u_right = U[:, 1:] - 0.5 * slope[:, 1:]  # 共 nx-1 个
     floor = MINIMUM_AREA_RATIO * area_ref
     u_left[0] = np.maximum(u_left[0], floor[:-1])
     u_right[0] = np.maximum(u_right[0], floor[1:])
     return u_left, u_right
-
-
-def _c_prefactor(beta: float, rho_mmhg: float) -> float:
-    """c = γ A^{1/4}，γ = √(β / (2ρ*))。"""
-    return float(np.sqrt(float(beta) / (2.0 * float(rho_mmhg))))
 
 
 def _wave_speed(
@@ -190,27 +197,46 @@ def _wave_speed(
     beta: np.ndarray | float,
     rho_mmhg: float,
 ) -> np.ndarray | float:
-    """小扰动波速；p、β 均为 mmHg 制，ρ* 为动量耦合有效密度。"""
+    """小扰动弹性波速 c = √(β√A/(2ρ*))；p、β 均为 mmHg 制，ρ* 为动量耦合有效密度。
+
+    **本函数返回纯弹性波速，不含动量修正 α**；需要含 α 的特征速度
+    λ± 请用 :func:`_characteristic_speeds`。
+
+    ``area``、``beta`` 均可为标量或数组（支持广播）。标量 ``beta`` 且
+    ``area=1`` 时即波速前置因子 γ = √(β/(2ρ*))——原先独立的
+    ``_c_prefactor`` 已并入本函数，用 ``_wave_speed(1.0, beta, rho_mmhg)``
+    取代。
+    """
     b = np.asarray(beta, dtype=float)
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     # c² = (A/ρ*)·dp/dA，tube law 下 dp/dA = β/(2√A) → c = √(β√A/(2ρ*))
-    # β 可为标量或与 A 同形的数组，故不用 _c_prefactor（仅标量）
+    # β 可为标量或与 A 同形的数组；标量 β 且 A=1 时即前置因子 γ = √(β/(2ρ*))
     return np.sqrt(b / (2.0 * float(rho_mmhg))) * (a ** 0.25)
 
 
 def _characteristic_speeds(
-    area: float,
-    flow: float,
-    beta: float,
+    area: np.ndarray | float,
+    flow: np.ndarray | float,
+    beta: np.ndarray | float,
     rho_mmhg: float,
     alpha: float,
-) -> tuple[float, float]:
-    """返回 (λ+, λ−)。与适定性诊断同一公式，含动量修正 α。"""
-    a = max(float(area), 1e-12)
-    u = float(flow) / a
-    c = float(_wave_speed(a, float(beta), rho_mmhg))
-    disc = float(np.sqrt(c * c + alpha * (alpha - 1.0) * u * u))
-    return alpha * u + disc, alpha * u - disc
+) -> tuple[np.ndarray | float, np.ndarray | float]:
+    """返回 (λ+, λ−)。**特征速度的唯一实现**，含动量修正 α。
+
+    λ± = αu ± √(c² + α(α−1)u²)，其中 c = √(β√A/(2ρ*))。
+    ``beta`` 可为标量或与 ``area`` 同形的数组；标量输入返回 ``float``。
+    HLL 波速、CFL 步长、边界相容与适定性诊断均调用本函数，避免多处
+    各自展开公式导致不同步。
+    """
+    a = np.maximum(np.asarray(area, dtype=float), 1e-12)
+    u = np.asarray(flow, dtype=float) / a
+    c = np.asarray(_wave_speed(a, beta, rho_mmhg), dtype=float)
+    disc = np.sqrt(c * c + alpha * (alpha - 1.0) * u * u)
+    lam_p = alpha * u + disc
+    lam_m = alpha * u - disc
+    if np.ndim(a) == 0:
+        return float(lam_p), float(lam_m)
+    return lam_p, lam_m
 
 
 def _riemann_invariants(
@@ -243,7 +269,8 @@ def area_from_flow_and_w_minus(
     Q > 0 时左端对 A 严格递减，正根唯一，用二分。根低于面积下限时返回下限
     （此时不变量无法精确满足，与 tube law 钳位一致）。
     """
-    gamma = _c_prefactor(beta, rho_mmhg)
+    # γ = √(β/(2ρ*))：即 A=1 时的波速，等价于旧 _c_prefactor(beta, rho)
+    gamma = float(_wave_speed(1.0, beta, rho_mmhg))
     a_min = MINIMUM_AREA_RATIO * float(area_ref)
     q = float(flow)
     w = float(w_minus)
@@ -298,7 +325,6 @@ def _outlet_flow_from_w_plus(
     A 由 tube law 反解，约束为 Q = A (W+ − 4c(A))。
     不收敛时返回 None，调用方退回「保留 PDE 流量、只定 A」。
     """
-    gamma = _c_prefactor(beta, rho_mmhg)
     a0 = float(area_ref)
     beta_f = float(beta)
     p_ref_f = float(p_ref)
@@ -320,7 +346,7 @@ def _outlet_flow_from_w_plus(
                 area_from_lumen_pressure_mmhg(p_lumen(q), a0, beta_f, p_ref_f)
             ).reshape(-1)[0]
         )
-        c = gamma * max(a, 1e-12) ** 0.25
+        c = float(_wave_speed(max(a, 1e-12), beta_f, rho_mmhg))
         return a * (float(w_plus) - 4.0 * c)
 
     q = float(q_guess)
@@ -374,22 +400,24 @@ def _hll_flux(
 ) -> np.ndarray:
     """HLL Riemann 求解器计算界面数值通量（对流部分）。
 
-    波速估计仍用弹性波速 u±c，使 CFL/耗散与压力波尺度一致；
-    压力驱动本身在单元中心以 −(A/ρ*)∂p/∂x 处理。
+    波速估计用 ``_characteristic_speeds`` 的 λ±（含动量修正 α），使耗散与
+    真实特征速度一致；压力驱动本身在单元中心以 −(A/ρ*)∂p/∂x 处理。
     """
     # 管腔截面积左右状态
     a_l = np.maximum(u_l[0], 1e-12)
     a_r = np.maximum(u_r[0], 1e-12)
     # 管腔体积流量左右状态
     q_l, q_r = u_l[1], u_r[1]
-    # 平均流速左右状态
-    uvel_l, uvel_r = q_l / a_l, q_r / a_r
-    # 波速左右状态
-    c_l = _wave_speed(a_l, beta_l, rho_mmhg)
-    c_r = _wave_speed(a_r, beta_r, rho_mmhg)
+    # 特征速度左右状态（λ± 唯一实现，含 α）
+    lambda_plus_l, lambda_minus_l = _characteristic_speeds(
+        a_l, q_l, beta_l, rho_mmhg, alpha
+    )
+    lambda_plus_r, lambda_minus_r = _characteristic_speeds(
+        a_r, q_r, beta_r, rho_mmhg, alpha
+    )
     # HLL Riemann 求解器 估算的SL, SR
-    s_l = np.minimum(np.minimum(uvel_l - c_l, uvel_r - c_r), 0)
-    s_r = np.maximum(np.maximum(uvel_l + c_l, uvel_r + c_r), 0)
+    s_l = np.minimum(np.minimum(lambda_minus_l, lambda_minus_r), 0)
+    s_r = np.maximum(np.maximum(lambda_plus_l, lambda_plus_r), 0)
 
     f_l = _flux_vector(a_l, q_l, alpha)
     f_r = _flux_vector(a_r, q_r, alpha)
@@ -478,7 +506,7 @@ class BloodFlowParameters:
         """远端/近端阻力 (mmHg·s/mL)，与 coronary_outlet 默认标定一致。"""
         q_mean = self.mean_coronary_flow_ml_s()
         r_d = (
-            self.p_ref_mmhg / max(q_mean, 1e-6)
+            self.p_ref_mmhg / max(q_mean, 1e-6) / max(1 + self.outlet_proximal_fraction, 1e-6)
             if self.outlet_r_distal_mmhg_s_per_ml is None
             else float(self.outlet_r_distal_mmhg_s_per_ml)
         )
@@ -611,7 +639,6 @@ class NavierStokes1D:
         branch_frame_indices: Optional[Sequence[int]] = None,
         branch_diameters_cm: Optional[Sequence[float]] = None,
         apply_murray_scale: bool = True,
-        align_p_ref_to_outlet: bool = True,
     ):
         self.raw_area = np.asarray(area_cm2, dtype=float).ravel()
         self.area_ref = self.raw_area.copy()
@@ -685,7 +712,6 @@ class NavierStokes1D:
             branch_diameters_cm,
             apply_murray_scale=apply_murray_scale,
         )
-        self._branch_outflow = np.zeros(len(self.side_branches), dtype=float)
         if self.side_branches:
             print(
                 f"Side branches: {len(self.side_branches)}, "
@@ -698,6 +724,21 @@ class NavierStokes1D:
                     f"Q_share≈{b.flow_fraction * self.paras.mean_coronary_flow_ml_s():.4f} mL/s"
                 )
 
+        # 用未缩放阻力对齐 p_ref，再构造各终端。份额放大后
+        # (Q_mean·f)·(R/f) 与 Q_mean·(R_d+R_p) 相同；若用 outlet.r_* 反推，
+        # 会把已经除过份额的阻力当成整树阻力。
+        q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
+        q_mean = self.paras.mean_coronary_flow_ml_s()
+        r_d, r_p = self.paras.resolve_outlet_resistances()
+        p_ref_user = float(self.paras.p_ref_mmhg)
+        p_anchor = float(q_mean) * (float(r_d) + float(r_p))
+        self.paras.p_ref_mmhg = p_anchor
+        print(
+            f"p_ref aligned to outlet steady lumen pressure: "
+            f"{p_ref_user:.2f} → {p_anchor:.2f} mmHg (Q_mean·(R_d+R_p))"
+        )
+        p_ref = float(self.paras.p_ref_mmhg)
+
         # 主支远端 + 各侧支 Windkessel（Murray share 标定 R、C）
         self.outlet = OutletWindkesselState(
             self.paras, flow_share=self.distal_flow_fraction
@@ -708,26 +749,11 @@ class NavierStokes1D:
             )
             for b in self.side_branches
         ]
-
-        q0 = float(np.asarray(self.paras.inlet_flow(0.0)).reshape(-1)[0])
-        q_mean = self.paras.mean_coronary_flow_ml_s()
         q_distal_mean = q_mean * self.distal_flow_fraction
         self.outlet.reset(
             p_wk=q_distal_mean * self.outlet.r_d,
             q_drive=q0 * self.distal_flow_fraction,
         )
-
-        # 将 tube law 的 p_ref 对齐到出口稳态管腔压（均值流量），避免 A=A₀ 时
-        # 整段压位与 Windkessel 脱节（常见表现：入口压系统性低于出口）
-        p_ref_user = float(self.paras.p_ref_mmhg)
-        if align_p_ref_to_outlet:
-            p_anchor = float(self.outlet.lumen_pressure(q_distal_mean))
-            self.paras.p_ref_mmhg = p_anchor
-            print(
-                f"p_ref aligned to outlet steady lumen pressure: "
-                f"{p_ref_user:.2f} → {p_anchor:.2f} mmHg (RCR outlet)"
-            )
-        p_ref = float(self.paras.p_ref_mmhg)
         # 侧支：按 P≈p_ref 时 Q_b≈Murray 份额初始化 P_wk，便于起步
         for br, wk in zip(self.side_branches, self.branch_outlets):
             q_share = q_mean * br.flow_fraction
@@ -799,7 +825,7 @@ class NavierStokes1D:
         侧支处连续方程含质量汇 −Q_b/Δx。
         """
         u_l, u_r = _muscl_states(state, self.area_ref)
-        n_if = self.nx - 1
+        n_if = self.nx - 1 # 有限体积法的内部界面数 number of interfaces between cells
         j = np.arange(n_if)
         rho_star = self.paras.momentum_rho()
         f_inner = _hll_flux(
@@ -952,10 +978,10 @@ class NavierStokes1D:
         return u
 
     def _stable_timestep(self, state: np.ndarray) -> float:
-        a = np.maximum(state[0], 1e-12)
-        u = state[1] / a
-        c = _wave_speed(a, self.beta, self.paras.momentum_rho())
-        lam = float(np.max(np.abs(u) + c))
+        lam_p, lam_m = _characteristic_speeds(
+            state[0], state[1], self.beta, self.paras.momentum_rho(), self.paras.alpha
+        )
+        lam = float(np.max(np.maximum(np.abs(lam_p), np.abs(lam_m))))
         if lam < 1e-14:
             return 1e-4
         return min(self.paras.cfl * self.dx / lam, self.paras.dt_max_s)
@@ -1165,9 +1191,7 @@ class NavierStokes1D:
 
         u = q / np.maximum(a, 1e-12)
         c = np.asarray(_wave_speed(a, self.beta, rho_star), dtype=float)
-        disc = np.sqrt(c**2 + alpha * (alpha - 1.0) * u**2)
-        lam_p = alpha * u + disc
-        lam_m = alpha * u - disc
+        lam_p, lam_m = _characteristic_speeds(a, q, self.beta, rho_star, alpha)
 
         # λ₋ > 0 ⇒ 该处两特征线同向，出口 BC 无法施加
         lam_m_space = lam_m.max(axis=0)
@@ -1643,7 +1667,6 @@ def calibrate_q_scale_to_inlet_peak(
     branch_frame_indices: Optional[Sequence[int]] = None,
     branch_diameters_cm: Optional[Sequence[float]] = None,
     apply_murray_scale: bool = True,
-    align_p_ref_to_outlet: bool = True,
     duration_s: float = 3.0,
     record_interval_steps: int = 30,
     peak_lo_mmhg: float = 90.0,
@@ -1719,7 +1742,6 @@ def calibrate_q_scale_to_inlet_peak(
             branch_frame_indices=branch_frame_indices,
             branch_diameters_cm=branch_diameters_cm,
             apply_murray_scale=apply_murray_scale,
-            align_p_ref_to_outlet=align_p_ref_to_outlet,
         )
         solver.run(
             duration_s=duration_s,
@@ -1831,7 +1853,7 @@ def example(
         duration_s=duration_s,
         record_interval_steps=30,
         peak_lo_mmhg=95.0,
-        peak_hi_mmhg=130.0,
+        peak_hi_mmhg=125.0,
         max_iters=10,
         verbose=True,
         cache_dir=cache_dir,

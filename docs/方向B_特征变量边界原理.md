@@ -565,7 +565,7 @@ $$
 
 | 符号 | 含义 |
 |------|------|
-| $\gamma$ | 波速前置因子；代码 `_c_prefactor` |
+| $\gamma$ | 波速前置因子；代码 `_wave_speed(A=1.0, beta, rho*)`（$A=1$ 时即 $\gamma$） |
 | $A^{1/4}$ | 使 $c\propto A^{1/4}$；积分 $\int(c/A)\,\mathrm{d}A=4c$ 的来源 |
 
 **为何必须算 $c$**：

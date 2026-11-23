@@ -36,7 +36,7 @@
 |------|------|
 | 控制方程 | 1D 守恒型 Navier-Stokes（含 Poiseuille 摩擦源项） |
 | 管壁 | \(p = P_{\mathrm{ref}} + \beta(\sqrt{A}-\sqrt{A_0})\) |
-| 空间离散 | 有限体积 + MUSCL + minmod TVD + HLL |
+| 空间离散 | 有限体积 + MUSCL + MC-TVD 限制器 + HLL |
 | 时间离散 | SSP-RK2 |
 | 入口 | `coronary_inlet.coronary_inlet_flow`（经 `BloodFlowParameters.inlet_flow`；`coronary_fraction * q_scale`） |
 | 出口 | 与 `coronary_outlet` 一致的 Windkessel ODE（在线耦合） |
@@ -250,12 +250,37 @@ c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
 
 ### 4.1 空间：有限体积 + MUSCL + TVD + HLL
 
-1. 在单元中心存储 \(U_j^n\)，界面 \(j+\tfrac{1}{2}\) 用中心差分估计梯度，经 **minmod** 限制得斜率 \(\sigma_j\)。
+1. 在单元中心存储 \(U_j^n\)，界面 \(j+\tfrac{1}{2}\) 的斜率用 **MC（monotonized central）** 限制器给出（`_minmod`，van Leer 型三参数 minmod）。记 \(\Delta_-=U_j-U_{j-1}\)、\(\Delta_+=U_{j+1}-U_j\)、\(\sigma^{\rm CD}=\tfrac{1}{2}(U_{j+1}-U_{j-1})\)，则
+
+   \[
+   \sigma_j=\operatorname{minmod}\bigl(\sigma^{\rm CD},\;2\Delta_-,\;2\Delta_+\bigr)
+   =\begin{cases}
+   \operatorname{sgn}(\Delta_-)\min\bigl(|\sigma^{\rm CD}|,\,2|\Delta_-|,\,2|\Delta_+|\bigr), & \Delta_-,\Delta_+,\sigma^{\rm CD}\ \text{同号}\\[2pt]
+   0, & \text{否则}
+   \end{cases}
+   \]
+
+   这是「**界面增量**」约定：\(\sigma_j\) 不含 \(\Delta x\) 因子，量纲与 \(U\) 相同，界面值直接为 \(U_j\pm\tfrac12\sigma_j\)。与「单位长度斜率」\(\hat\sigma_j=\sigma_j/\Delta x\) 互为 \(\Delta x\) 倍，因 minmod 一阶齐次，两种约定下公式形式不变。\(2\) 倍来自半步增量与全程增量的换算：\(\sigma_j\le 2\Delta_+\) 保证右界面不越过 \(U_{j+1}\)。
+
+   > 说明：早期版本用的是两参数 minmod \(\operatorname{minmod}(\Delta_-,\Delta_+)\)（等价于取单侧差，光滑区耗散偏大）。MC 在光滑区给出更接近中心差的斜率（上界放宽到 \(2\Delta_\pm\)），同时仍满足 TVD，故替换为 MC。二者均二阶、线性场上完全一致，差别在于对非均匀梯度的限制强度。
 2. MUSCL 重构：
    - \(U_L = U_j + \tfrac{1}{2}\sigma_j\)
    - \(U_R = U_{j+1} - \tfrac{1}{2}\sigma_{j+1}\)
+   - 首尾单元（\(j=0\)、\(j=n_x-1\)）斜率置 0，退化为分段常数重构；边界界面不用重构态，而用 §5.1–5.2 的特征相容条件。
 3. 重构后的 \(A\) 不低于 \(0.8\,A_0\)（`MINIMUM_AREA_RATIO`，防止非物理负面积）。
 4. 内部界面用 **HLL** 近似黎曼解得到数值通量 \(\hat{F}_{j+1/2}\)；边界界面用物理通量 \(F(U_b)\)。\(U_b\) 由 §5.1–5.2 的特征相容条件给定，因此这条边界通量与出射 Riemann 不变量一致，而不是零梯度外推状态上的通量。
+
+   HLL 波速取界面左右两侧的**真实特征速度**（`_characteristic_speeds`，含动量修正 \(\alpha\)）：
+
+   \[
+   s_L=\min\bigl(\lambda_{-,L},\ \lambda_{-,R},\ 0\bigr),\qquad
+   s_R=\max\bigl(\lambda_{+,L},\ \lambda_{+,R},\ 0\bigr),
+   \qquad \lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}
+   \]
+
+   同侧取"两侧各算一个、再分别取 min/max"是为了保证 \(s_L\le\) 真实最小特征速度、\(s_R\ge\) 真实最大特征速度，这是 HLL 正性守恒的前提。
+
+   > 说明：早期版本用 \(\lambda_\pm=u\pm c\)（漏 \(\alpha\)），会使 \(s_R\) 低于真实 \(\lambda_+^{\max}\) 约 2–3%，削弱正性保证。同时须注意 \(s_R\) 应取 **\(\lambda_{+,L}\) 与 \(\lambda_{+,R}\)** 的最大值（而非 \(\lambda_{-,R}\)），否则在左右流速差大时（如狭窄后射流）会漏掉左侧更大的波速。
 
 ### 4.2 时间：SSP-RK2
 
@@ -364,15 +389,25 @@ c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
 
 物理上，\(c\) 刻画**压力扰动沿管轴传播**的快慢：顺应性越小（\(\beta\) 越大）或管腔越大，波速越高，CFL 对 \(\Delta t\) 的限制越严。
 
-#### 为何取 \(|u|+c\)
+#### 为何取 \(\max|\lambda_\pm|\)
 
-一维可变形管方程在双曲意义下有两族特征线，其有效传播速度约为 \(u \pm c\)。CFL 条件要求在一个时间步内，对流与弹性波**不应跨越超过约一个网格单元**：
+一维可变形管方程在双曲意义下有两族特征线。含动量修正 \(\alpha\) 时，雅可比矩阵的特征值为
 
 \[
-\Delta t \lesssim \frac{\Delta x}{|u| + c}
+\lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}
 \]
 
-取全网格 \(\max_x(|u|+c)\) 作为最严格（最小 \(\Delta t\)）的约束；再乘以 \(\mathrm{CFL}<1\) 留出数值安全裕度（MUSCL–HLL + SSP-RK2 仍建议 \(\mathrm{CFL}\approx 0.35\)–\(0.5\)）。
+CFL 条件要求在一个时间步内，对流与弹性波**不应跨越超过约一个网格单元**：
+
+\[
+\Delta t \le \frac{\mathrm{CFL}\,\Delta x}{\max_x \max(|\lambda_+|,\,|\lambda_-|)}
+\]
+
+`_stable_timestep` 取全网格 \(\max_x\bigl(|\alpha u|+\sqrt{c^2+\alpha(\alpha-1)u^2}\bigr)\) 作为最严格（最小 \(\Delta t\)）的约束。
+
+> 说明：该表达式与 \(\max(|\lambda_+|,|\lambda_-|)\) **恒等**——因 \(\sqrt{c^2+\alpha(\alpha-1)u^2}>0\)，无论 \(\alpha u\) 正负，绝对值较大的那个特征值总等于 \(|\alpha u|+\sqrt{\cdot}\)。早期版本用 \(|u|+c\)（漏了 \(\alpha\)），会使 \(\Delta t\) 偏大约 2–3%，已修正。
+>
+> 再乘以 \(\mathrm{CFL}<1\) 留出数值安全裕度（MUSCL–HLL + SSP-RK2 仍建议 \(\mathrm{CFL}\approx 0.35\)–\(0.5\)）。当 \(\alpha=1.1\)、\(c\sim500\)–\(700\)、\(u\sim100\)–\(200\) cm/s 时，\(\alpha\) 修正约 2–3%。
 
 #### 默认参数与调参
 
@@ -690,7 +725,7 @@ sequenceDiagram
 | \(Q(x,0)\) | \(Q_{\mathrm{in}}(0)\) | 与入口定流量 BC 一致（**非** \(Q_{\mathrm{mean}}\)） |
 | \(P_{\mathrm{wk}}(0)\) | \(Q_{\mathrm{mean}}\, R_d\) | Windkessel 稳态标定 |
 | \(P_{\mathrm{lumen}}(0)\) | \(P_{\mathrm{wk}} + R_p\, Q_{\mathrm{in}}(0)\) | `outlet.reset(q_drive=…)` |
-| \(P_{\mathrm{ref}}\) | 构造末写为 \(P_{\mathrm{wk}}+R_p Q_{\mathrm{mean}}\) | 与出口管腔压锚点对齐 |
+| \(P_{\mathrm{ref}}\) | 构造各终端**之前**写为 \(Q_{\mathrm{mean}}(R_d+R_p)\) | 与出口稳态管腔压对齐；\(R_d,R_p\) 取 `resolve_outlet_resistances()` 的未缩放值 |
 
 **参数标定链**：
 
@@ -700,7 +735,7 @@ R_d：显式 outlet_r_distal…，或 None 时 R_d = P_ref / Q_mean
 outlet_proximal_fraction  →  R_p = fraction · R_d（若未显式给 Rp）
 ```
 
-默认 `outlet_r_distal_mmhg_s_per_ml=20` 时，\(P_{\mathrm{wk}}(0)=Q_{\mathrm{mean}}\cdot 20\)，**不必**等于初始 `p_ref_mmhg`；RCR 出口模型随后会把 `p_ref_mmhg` 抬到与出口稳态管腔压一致。
+默认 `outlet_r_distal_mmhg_s_per_ml=25` 时，稳态管腔压 \(Q_{\mathrm{mean}}(R_d+R_p)\) 一般不等于字段初值 75。`NavierStokes1D` 在创建 `outlet` / `branch_outlets` **之前**必定把 `p_ref_mmhg` 改成该值。终端对象里的阻力已按 Murray 份额放大（\(R/f\)），用它反推参考压会把份额混进 \(P_{\mathrm{ref}}\)；未缩放的 \(R_d\)、\(R_p\) 与 \(Q_{\mathrm{mean}}\) 已经决定稳态压（份额放大后 \((Q_{\mathrm{mean}} f)\cdot(R/f)\) 与之相同）。该对齐不可关闭：\(A=A_0\) 时 tube law 与出口压位不一致会使入口压系统性偏离出口。
 
 **`OutletWindkesselState.reset(p_wk=None, q_drive=None)`**
 
@@ -794,7 +829,7 @@ NavierStokes1D(
 1. \(\beta(x)\leftarrow\) 常数 `beta_mmhg_per_cm`（全段一致，狭窄段**不**放大）
 2. `geometry.build_stenosis_segment` → MLA + 近/远端参考（写入 `prox_idx`/`dist_idx`/`lesions`；仅诊断/绘图，不改 β）
 3. 近端段 \(x\le x_{\mathrm{prox}}\)、远端段 \(x\ge x_{\mathrm{dist}}\) 的 \(A_0\) 分别平整为参考点面积
-4. `outlet.reset(...)`；并更新 `p_ref_mmhg` 与出口稳态管腔压对齐
+4. 先把 `p_ref_mmhg` 写成 \(Q_{\mathrm{mean}}(R_d+R_p)\)，再构造并 `reset` 出口与侧支 Windkessel
 5. \(A=A_0\)，\(Q=Q_{\mathrm{in}}(0)\)，刷新 `pressure`
 
 ### 7.2 由半径构造面积
@@ -852,7 +887,7 @@ solver = NavierStokes1D(area, L, par)
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `p_ref_mmhg` | 75.0 | tube law 参考压 (mmHg)，= `P_INLET_REF_MMHG`；构造末可能被抬到出口稳态管腔压 |
+| `p_ref_mmhg` | 75.0 | tube law 参考压 (mmHg)，= `P_INLET_REF_MMHG`。`NavierStokes1D` 构造时必定改写为 \(Q_{\mathrm{mean}}(R_d+R_p)\)，且发生在创建 Windkessel 之前 |
 | `beta_mmhg_per_cm` | 3500.0 | 管壁刚度 β (mmHg/cm)；因 \(\beta(\sqrt A-\sqrt{A_0})\) 中 \(\sqrt A\) 单位为 cm。**全段常数，不随狭窄放大** |
 
 ### 8.3 入口（→ `coronary_inlet_flow`）
@@ -987,7 +1022,8 @@ NavierStokes1D(
 | `lumen_pressure_mmhg(A, A0, beta, p_ref)` | tube law：由 \(A\) 算管腔标量压 |
 | `area_from_lumen_pressure_mmhg(p, A0, beta, p_ref)` | tube law 反解 \(A\) |
 | `integral_mean(y, x)` | 梯形法积分均值 \(\int y\,\mathrm{d}x / \int \mathrm{d}x\)，用于 FFR 的周期均值 |
-| `_wave_speed(A, beta, rho*)` | 小扰动波速 \(c=\sqrt{\beta\sqrt A/(2\rho^*)}\) |
+| `_wave_speed(A, beta, rho*)` | 弹性波速 \(c=\sqrt{\beta\sqrt A/(2\rho^*)}\)（不含 \(\alpha\)）；`A`、`beta` 可为标量或数组。\(A=1\) 时即波速前置因子 \(\gamma=\sqrt{\beta/(2\rho^*)}\)（原独立的 `_c_prefactor` 已并入本函数） |
+| `_characteristic_speeds(A, Q, beta, rho*, alpha)` | 特征速度 \(\lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}\)；**唯一实现**，HLL 波速 / CFL / 边界 / 适定性诊断共用。`A`、`beta` 可为标量或数组，标量输入返回 `float` |
 | `_riemann_invariants(A, Q, beta, rho*)` | \(W_\pm=u\pm 4c\)（tube law，不是浅水的 \(u\pm 2c\)） |
 | `area_from_flow_and_w_minus(Q, W−, ...)` | 入口：由定流量与出射不变量反解 \(A\) |
 | `_outlet_flow_from_w_plus(W+, ...)` | 出口：由出射不变量与 RCR 压力联立反解 \(Q\)；失败返回 `None` |
@@ -995,7 +1031,7 @@ NavierStokes1D(
 | `inlet_pressure_peak_mmhg(solver, cycle_s=None)` | 末段一个心动周期（默认 \(60/\mathrm{HR}\)）入口 \(p(0)\) 峰值 |
 | `calibrate_q_scale_to_inlet_peak(...)` | 外环二分标定 `q_scale`；可选 `cache_dir` 落盘每次迭代场数据 |
 | `calibration_cache.py` | 缓存读写与事后绘图（`load` / `plot` / CLI），与主求解器分离 |
-| `_minmod(a, b)` | minmod TVD 限制器 |
+| `_minmod(cd, Δ₋, Δ₊)` | MC（monotonized central）TVD 限制器：`minmod(中心差分, 2Δ₋, 2Δ₊)`；三者同号取绝对值最小并保号，否则 0 |
 | `_muscl_states(U, A0)` | 界面左右重构态（含面积下限钳位） |
 | `_flux_vector(A, Q, alpha)` | 物理通量 \(F=[Q,\ \alpha Q^2/A]^\mathsf{T}\) |
 | `_hll_flux(...)` | HLL 近似黎曼通量 |
@@ -1346,7 +1382,7 @@ def _apply_boundaries(self, state, advance=False):
 |------|------|
 | 新增压力波形 | `inlet_pressure(t)`，例如 \(95+20\sin(2\pi t/T)\) mmHg |
 | `inlet_mode` 开关 | `"flow"`（默认）/ `"pressure"`，保持向后兼容 |
-| **重新标定 `p_ref`** | 不应再等于出口稳态管腔压；建议取入口均值附近，并**关闭** `align_p_ref_to_outlet` |
+| **重新标定 `p_ref`** | 当前定流量模型必定令 \(P_{\mathrm{ref}}=Q_{\mathrm{mean}}(R_d+R_p)\)，没有关闭开关。若改为入口定压，参考压应改锚到入口均值，不能沿用这一出口锚点 |
 | 重新标定阻力 | 定压下流量是结果；若需目标流量 4 mL/s，按 \(R=(p_{\text{in}}-p_{\text{venous}})/Q_{\text{target}}\) 反标 |
 
 **实测对比**（`data/stenoses_data`, `nx=200`，详见 `docs/边界条件分析报告.md`）：
@@ -1388,7 +1424,7 @@ A：会。乘法缩放同时改变流量均值与峰谷差，压力脉压差通�
 A：调用 `calibrate_q_scale_to_inlet_peak(...)`（二分，最多 5 次 `run`）。`example()` 已默认接入。见 [§13.1](#131-用-q_scale-外环标定入口峰值压)。
 
 **Q：如何改出口阻力/顺应性？**  
-A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等；与 `coronary_outlet` 中参数含义相同。当前默认 `Rd=25`；显式给定 `Rd` 且开启 `align_p_ref_to_outlet` 时，初始 `p_ref_mmhg` 会被出口稳态 \(P_{\mathrm{lumen}}\) 覆盖。
+A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等；与 `coronary_outlet` 中参数含义相同。当前默认 `Rd=25`。构造求解器时必定用 \(Q_{\mathrm{mean}}(R_d+R_p)\) 覆盖 `p_ref_mmhg`，发生在创建 Windkessel 之前，不能关闭。
 
 **Q：无 GUI 如何出图？**  
 A：matplotlib：`MPLBACKEND=Agg` 后自行 `savefig`；Plotly：`plot_results_1(show=False)` 再 `fig.write_html(...)`。
