@@ -666,6 +666,10 @@ class NavierStokes1D:
         self.history_pressure: np.ndarray | None = None  # (n_save, nx) 管腔压 p (mmHg)
         self.history_branch_flow: np.ndarray | None = None  # (n_save, n_branch) 侧支出流 Q_b
 
+        # 末段一个心动周期的入口/出口压力峰谷（收缩压 / 舒张压类比）。
+        # run() 结束时由 _update_pressure_extrema() 写入；键见该方法说明。
+        self.pressure_extrema: dict | None = None
+
         # #######其它状态初值设置#######
         # 狭窄检测（仅用于诊断与绘图标注；不修改 β）
         # β 保持 paras.beta_mmhg_per_cm 的常数值。
@@ -845,7 +849,7 @@ class NavierStokes1D:
             state[0, -1], state[1, -1], self.paras.alpha
         ).ravel()
 
-        dudt = -(f_face[:, 1:] - f_face[:, :-1]) / self.dx
+        dudt = -(f_face[:, 1:] - f_face[:, :-1]) / self.dx  # 暂未添加源项，在下方逐步累加
         a = np.maximum(state[0], 1e-12)
 
         # 压力梯度源项：−(A/ρ*) ∂p/∂x（p 由 tube law 在单元中心计算）
@@ -1057,9 +1061,16 @@ class NavierStokes1D:
         self.history_pressure = np.array(p_hist)
         self.history_branch_flow = np.array(qb_hist)
         t1 = time.perf_counter()
+        # 末段一个心动周期的入口/出口峰谷（收缩压/舒张压类比），写入 self.pressure_extrema
+        try:
+            self.pressure_extrema_mmhg()
+        except RuntimeError as exc:
+            self.pressure_extrema = None
+            if verbose:
+                print(f"  [P extrema] skipped: {exc}")
         if verbose:
             print(f"完成 {step} 步, t={self.time:.4f} s, 耗时 {t1-t0:.3f} s")
-            self.print_pressure_diagnostics()
+            self.print_pressure_extrema()
             self.print_wellposedness_diagnostics()
         return (
             self.history_area,
@@ -1068,83 +1079,87 @@ class NavierStokes1D:
             self.history_time,
         )
 
-    def pressure_diagnostics(
-        self, warmup_fraction: float = 0.5
+    def pressure_extrema_mmhg(
+        self,
+        cycle_s: float | None = None,
+        cache: bool = True,
     ) -> dict[str, float]:
-        """近端/远端（及入口/出口）压力诊断，便于检查是否出现 p_prox < p_dist。"""
-        ip = int(self.prox_idx)
-        id_ = int(self.dist_idx)
-        p_ref = float(self.paras.p_ref_mmhg)
+        """末段一个心动周期内入口/出口管腔压的峰谷值 (mmHg)。
 
-        if self.history_pressure is None:
-            p = self.pressure
-            p_in, p_out = float(p[0]), float(p[-1])
-            p_prox, p_dist = float(p[ip]), float(p[id_])
-            return {
-                "p_ref_mmhg": p_ref,
-                "p_in_mean": p_in,
-                "p_out_mean": p_out,
-                "p_prox_mean": p_prox,
-                "p_dist_mean": p_dist,
-                "dp_prox_minus_dist": p_prox - p_dist,
-                "dp_in_minus_out": p_in - p_out,
-                "prox_idx": float(ip),
-                "dist_idx": float(id_),
-            }
+        类比临床的**收缩压 / 舒张压**：``*_systolic`` 取周期内最大值，
+        ``*_diastolic`` 取最小值。同时给出峰谷差（脉压）与均值。
 
-        n = self.history_pressure.shape[0]
-        i0 = int(max(n * warmup_fraction, 0))
-        p_avg = np.mean(self.history_pressure[i0:], axis=0)
-        p_in, p_out = float(p_avg[0]), float(p_avg[-1])
-        p_prox, p_dist = float(p_avg[ip]), float(p_avg[id_])
-        return {
-            "p_ref_mmhg": p_ref,
-            "p_in_mean": p_in,
-            "p_out_mean": p_out,
-            "p_prox_mean": p_prox,
-            "p_dist_mean": p_dist,
-            "dp_prox_minus_dist": p_prox - p_dist,
-            "dp_in_minus_out": p_in - p_out,
-            "p_prox_min": float(np.min(self.history_pressure[i0:, ip])),
-            "p_prox_max": float(np.max(self.history_pressure[i0:, ip])),
-            "p_dist_min": float(np.min(self.history_pressure[i0:, id_])),
-            "p_dist_max": float(np.max(self.history_pressure[i0:, id_])),
-            "inversion_fraction": float(
-                np.mean(
-                    self.history_pressure[i0:, ip] < self.history_pressure[i0:, id_]
-                )
-            ),
-            "prox_idx": float(ip),
-            "dist_idx": float(id_),
-        }
+        窗口固定为**最后一个心动周期** ``[t_end − cycle_s, t_end]``，不做
+        任何瞬态截断：末周期应已进入数值稳定期且周期稳定，否则应延长
+        ``duration_s`` 而不是在统计口径上打折。
 
-    def print_pressure_diagnostics(
-        self, warmup_fraction: float = 0.5
-    ) -> dict[str, float]:
-        """打印近端/远端压力对照；返回诊断字典。"""
-        stats = self.pressure_diagnostics(warmup_fraction=warmup_fraction)
-        ip = int(stats["prox_idx"])
-        id_ = int(stats["dist_idx"])
-        tag = (
-            "instant"
-            if self.history_pressure is None
-            else f"mean after {warmup_fraction:.0%}T"
-        )
-        print(
-            f"[P diag {tag}] p_ref={stats['p_ref_mmhg']:.2f} | "
-            f"in={stats['p_in_mean']:.2f} out={stats['p_out_mean']:.2f} "
-            f"(Δ={stats['dp_in_minus_out']:+.2f}) | "
-            f"prox[{ip}]={stats['p_prox_mean']:.2f} dist[{id_}]={stats['p_dist_mean']:.2f} "
-            f"(Δ={stats['dp_prox_minus_dist']:+.2f}) mmHg"
-        )
-        if "inversion_fraction" in stats:
-            print(
-                f"  prox range [{stats['p_prox_min']:.2f}, {stats['p_prox_max']:.2f}], "
-                f"dist range [{stats['p_dist_min']:.2f}, {stats['p_dist_max']:.2f}], "
-                f"p_prox<p_dist fraction={stats['inversion_fraction']:.1%}"
+        Parameters
+        ----------
+        cycle_s :
+            统计窗口长度 (s)；``None`` 取一个心动周期 ``60/heart_rate_bpm``。
+        cache :
+            是否把结果写入 ``self.pressure_extrema``（默认 True）。
+
+        Returns
+        -------
+        dict
+            ``p_in_systolic`` / ``p_in_diastolic`` / ``p_in_mean`` /
+            ``p_in_pulse``（= 收缩 − 舒张）、对应的 ``p_out_*``、
+            ``p_drop_systolic`` / ``p_drop_diastolic``（入口减出口），
+            以及 ``cycle_s``（窗口长度）、``n_samples``、``t_start`` / ``t_end``。
+        """
+        if self.history_time is None or self.history_pressure is None:
+            raise RuntimeError("请先调用 run()")
+
+        t = np.asarray(self.history_time, dtype=float)
+        p = np.asarray(self.history_pressure, dtype=float)
+        if cycle_s is None:
+            cycle_s = 60.0 / float(self.paras.heart_rate_bpm)
+        cycle_s = float(cycle_s)
+
+        t_end = float(t[-1])
+        t0 = t_end - cycle_s
+        mask = t >= t0
+        n_samples = int(np.count_nonzero(mask))
+        if n_samples < 2:
+            raise RuntimeError(
+                f"末段采样点不足（{n_samples} 个），无法取压力峰谷；"
+                f"请减小 record_interval_steps 或延长 duration_s"
             )
-        if stats["dp_prox_minus_dist"] < 0.0:
-            print("  !! warning: p_prox < p_dist (pressure inversion)")
+
+        p_in = p[mask, 0]
+        p_out = p[mask, -1]
+        stats = {
+            "p_in_systolic": float(np.max(p_in)),
+            "p_in_diastolic": float(np.min(p_in)),
+            "p_in_mean": float(np.mean(p_in)),
+            "p_out_systolic": float(np.max(p_out)),
+            "p_out_diastolic": float(np.min(p_out)),
+            "p_out_mean": float(np.mean(p_out)),
+            "cycle_s": cycle_s,
+            "n_samples": float(n_samples),
+            "t_start": float(t[mask][0]),
+            "t_end": t_end,
+        }
+        stats["p_in_pulse"] = stats["p_in_systolic"] - stats["p_in_diastolic"]
+        stats["p_out_pulse"] = stats["p_out_systolic"] - stats["p_out_diastolic"]
+        stats["p_drop_systolic"] = stats["p_in_systolic"] - stats["p_out_systolic"]
+        stats["p_drop_diastolic"] = stats["p_in_diastolic"] - stats["p_out_diastolic"]
+
+        if cache:
+            self.pressure_extrema = dict(stats)
+        return stats
+
+    def print_pressure_extrema(self, cycle_s: float | None = None) -> dict[str, float]:
+        """打印入口/出口的收缩压/舒张压类比；返回统计字典。"""
+        stats = self.pressure_extrema_mmhg(cycle_s=cycle_s)
+        print(
+            f"[P extrema {stats['cycle_s']:.4f} s, n={int(stats['n_samples'])}] "
+            f"in: SBP={stats['p_in_systolic']:.2f} DBP={stats['p_in_diastolic']:.2f} "
+            f"(pulse={stats['p_in_pulse']:.2f}) mmHg | "
+            f"out: SBP={stats['p_out_systolic']:.2f} DBP={stats['p_out_diastolic']:.2f} "
+            f"(pulse={stats['p_out_pulse']:.2f}) mmHg"
+        )
         return stats
 
     def wellposedness_diagnostics(
@@ -1300,18 +1315,8 @@ class NavierStokes1D:
         }
 
     def ffr_ratio(self, warmup_fraction: float = 0.5) -> np.ndarray:
-        """沿程压力 FFR：时间平均 p(x) / p(prox)，期望单调非增。"""
+        """沿程压力 FFR：时间平均 p(x) / p(0)(入口处压力)，期望单调非增。"""
         n_step = len(self.history_time)
-        # 流量FFR
-        # if self.history_flow is None:
-        #     assert ValueError("请先调用 run()")
-        # else:
-        #     i0 = int(max(n_step * warmup_fraction, 0))
-        #     p_mean = [integral_mean(self.history_flow[i0:, i], self.history_time[i0:]) for i in range(self.nx)]
-        #     p_mean = np.asarray(p_mean, dtype=float).ravel()
-        # # 近端参考流量
-        # p0 = float(integral_mean(self.history_flow[i0:, self.prox_idx], self.history_time[i0:]))
-        # ffr = p_mean / p0
 
         # 积分均值，压力沿程分布的均值计算FFR
         if self.history_flow is None:
@@ -1320,8 +1325,8 @@ class NavierStokes1D:
             i0 = int(max(n_step * warmup_fraction, 0))
             p_mean = [integral_mean(self.history_pressure[i0:, i], self.history_time[i0:]) for i in range(self.nx)]
             p_mean = np.asarray(p_mean, dtype=float).ravel()
-        # 近端参考流量
-        p0 = float(integral_mean(self.history_pressure[i0:, self.prox_idx], self.history_time[i0:]))
+        # 参考压力（入口处）
+        p0 = float(integral_mean(self.history_pressure[i0:, 0], self.history_time[i0:]))
         ffr = p_mean / p0
         return np.clip(ffr, 0.0, 1.0)
     
@@ -1642,23 +1647,6 @@ def roi_process(roi_idx, area, branch_idx, branch_d):
 
 
 
-def inlet_pressure_peak_mmhg(
-    solver: "NavierStokes1D",
-    cycle_s: float | None = None,
-) -> float:
-    """末段一个心动周期内入口 ``p(0,t)`` 的峰值 (mmHg)。"""
-    if solver.history_time is None or solver.history_pressure is None:
-        raise RuntimeError("请先调用 run()")
-    t = np.asarray(solver.history_time, dtype=float)
-    if cycle_s is None:
-        cycle_s = 60.0 / float(solver.paras.heart_rate_bpm)
-    t0 = float(t[-1]) - float(cycle_s)
-    mask = np.ones(t.shape[0], dtype=bool) if t0 <= float(t[0]) else (t >= t0)
-    if int(np.count_nonzero(mask)) < 2:
-        raise RuntimeError("末段采样点不足，无法取入口压力峰值")
-    return float(np.max(solver.history_pressure[mask, 0]))
-
-
 def calibrate_q_scale_to_inlet_peak(
     area_cm2: np.ndarray | list,
     vessel_length_cm: float,
@@ -1748,7 +1736,7 @@ def calibrate_q_scale_to_inlet_peak(
             record_interval_steps=record_interval_steps,
             verbose=True,
         )
-        peak = inlet_pressure_peak_mmhg(solver)
+        peak = float(solver.pressure_extrema_mmhg()["p_in_systolic"])
         in_range = bool(peak_lo_mmhg < peak < peak_hi_mmhg)
         # loss：距目标窗的偏差（越小越好）；窗内为 0，另加中心偏置作并列打破
         if in_range:

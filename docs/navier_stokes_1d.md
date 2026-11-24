@@ -933,10 +933,10 @@ MINIMUM_INLET_FLOW_ML_S ← 0.01 mL/s，峰谷均不得低于此值
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `outlet_r_distal_mmhg_s_per_ml` | 25 | \(R_d\)；`None` 则 \(P_{\mathrm{ref}}/Q_{\mathrm{mean}}\) |
+| `outlet_r_distal_mmhg_s_per_ml` | 25 | \(R_d\)；`None` 则 \(P_{\mathrm{ref}}/Q_{\mathrm{mean}}/(1+f_p)\)（\(f_p\) = `outlet_proximal_fraction`） |
 | `outlet_r_proximal_mmhg_s_per_ml` | None | \(R_p\)；None 则 `proximal_fraction * R_d` |
-| `outlet_compliance_ml_per_mmhg` | 0.05 | 顺应性 \(C\) |
-| `outlet_proximal_fraction` | 0.1 | 近端阻力比例（`DEFAULT_PROXIMAL_FRACTION`） |
+| `outlet_compliance_ml_per_mmhg` | 0.012 | 顺应性 \(C\) |
+| `outlet_proximal_fraction` | 0.2 | 近端阻力比例（`DEFAULT_PROXIMAL_FRACTION`） |
 
 Windkessel ODE 驱动流量固定为出口管腔流量 \(Q(L)\)，无额外配置项。
 
@@ -965,6 +965,7 @@ NavierStokes1D(
 | `pressure` | 沿程管腔标量压 \(p(x)\) (mmHg)，shape `(nx,)`；由 tube law 从 \(A\) 派生 |
 | `outlet` | `OutletWindkesselState` 实例 |
 | `time` | 当前物理时间 (s) |
+| `pressure_extrema` | `run()` 结束后写入的入口/出口收缩压–舒张压字典（§9.4）；运行前为 `None` |
 
 ### 9.2 `run(duration_s, record_interval_steps=20, verbose=True)`
 
@@ -983,7 +984,7 @@ NavierStokes1D(
 
 结束时自动调用两个诊断并打印：
 
-- `print_pressure_diagnostics()` — 近/远端压力对照、是否出现 \(p_{\text{prox}}<p_{\text{dist}}\)（字段说明见 §9.4）
+- `print_pressure_extrema()` — 末段一个心动周期的入口/出口收缩压/舒张压（§9.4），同时写入 `solver.pressure_extrema`
 - `print_wellposedness_diagnostics()` — 以 \(\lambda_\pm\) 判定亚/跨临界；附带临界流量、面积钳位（§9.6）
 
 ### 9.3 绘图
@@ -993,27 +994,28 @@ NavierStokes1D(
 | `plot_results()` | matplotlib 2×2：\(A(t,x)\)、沿程平均 \(Q\)、指定点 \(p(t)\)、末时刻 \(A\)/\(p\) |
 | `plot_results_1(show=True, renderer=None)` | Plotly 交互版同类四图；`demo()` 默认调用此接口 |
 
-### 9.4 压力诊断
+### 9.4 入口/出口收缩压–舒张压（`pressure_extrema`）
 
-| 方法 | 说明 |
-|------|------|
-| `pressure_diagnostics(warmup_fraction=0.5)` | 返回压力统计字典（见下表），用后 `1-warmup_fraction` 段数据 |
-| `print_pressure_diagnostics(...)` | 打印上述统计，并在 `p_prox < p_dist` 时给出告警 |
+`pressure_extrema_mmhg(cycle_s=None, cache=True)` 统计**末段一个心动周期**内入口 \(x=0\) 与出口 \(x=L\) 的管腔压极大/极小值，类比临床收缩压/舒张压。
 
-返回字段：
+窗口固定为最后一个心动周期 \([t_{\text{end}}-\texttt{cycle\_s},\ t_{\text{end}}]\)（`cycle_s=None` 取 \(60/\mathrm{HR}\)），不做瞬态截断——末周期应已进入数值稳定期；若周期尚未稳定，应延长 `duration_s` 而不是缩小统计窗口。
+
+辅助打印：`print_pressure_extrema(cycle_s=None)` 输出 SBP/DBP/脉压，返回同一字典。
+
+返回字典（同时缓存到 `solver.pressure_extrema`，`run()` 结束自动写入）：
 
 | 字段 | 含义 |
 |------|------|
-| `p_ref_mmhg` | tube law 参考压 |
-| `p_in_mean` / `p_out_mean` | 入口 / 出口压力均值 |
-| `p_prox_mean` / `p_dist_mean` | 近 / 远端参考点压力均值 |
-| `dp_prox_minus_dist` | \(\Delta p_{\text{prox}\to\text{dist}}\)，**应 > 0** |
-| `dp_in_minus_out` | 进出口压差 |
-| `p_prox_min` / `p_prox_max` | 近端压力脉动范围 |
-| `p_dist_min` / `p_dist_max` | 远端压力脉动范围 |
-| `inversion_fraction` | \(p_{\text{prox}}<p_{\text{dist}}\) 的时间占比，**应 ≈ 0** |
+| `p_in_systolic` / `p_in_diastolic` | 入口收缩压（周期内 \(\max p(0,t)\)）/ 舒张压（\(\min\)） |
+| `p_in_mean` | 入口窗口内时间均值 |
+| `p_in_pulse` | 入口脉压 \(=\) 收缩 − 舒张 |
+| `p_out_systolic` / `p_out_diastolic` / `p_out_mean` / `p_out_pulse` | 出口对应四项 |
+| `p_drop_systolic` / `p_drop_diastolic` | 收缩期 / 舒张期进出口压差 |
+| `cycle_s` / `n_samples` / `t_start` / `t_end` | 实际窗口长度、参与统计的采样帧数、窗口起止时刻 |
 
-> 若 `dp_prox_minus_dist < 0` 或 `inversion_fraction` 显著大于 0，说明压力沿程出现倒置，通常是边界条件或阻力标定有问题。
+> 早期版本另有 `pressure_diagnostics` / `print_pressure_diagnostics`，按近端/远端**参考点**（`prox_idx`/`dist_idx`）做压力统计并检查沿程倒置。因入口/出口峰谷已直接给出边界压信息，这两个接口已移除。
+>
+> 采样帧数受 `record_interval_steps` 限制：帧太稀时峰值会被低估。若 `n_samples` 偏小（例如 < 50），应减小 `record_interval_steps` 再跑。
 
 ### 9.5 模块级工具函数
 
@@ -1028,7 +1030,6 @@ NavierStokes1D(
 | `area_from_flow_and_w_minus(Q, W−, ...)` | 入口：由定流量与出射不变量反解 \(A\) |
 | `_outlet_flow_from_w_plus(W+, ...)` | 出口：由出射不变量与 RCR 压力联立反解 \(Q\)；失败返回 `None` |
 | `run_uniform_tube_mass_check(...)` | 等截面直管、无侧支的质量守恒检查（方向 A） |
-| `inlet_pressure_peak_mmhg(solver, cycle_s=None)` | 末段一个心动周期（默认 \(60/\mathrm{HR}\)）入口 \(p(0)\) 峰值 |
 | `calibrate_q_scale_to_inlet_peak(...)` | 外环二分标定 `q_scale`；可选 `cache_dir` 落盘每次迭代场数据 |
 | `calibration_cache.py` | 缓存读写与事后绘图（`load` / `plot` / CLI），与主求解器分离 |
 | `_minmod(cd, Δ₋, Δ₊)` | MC（monotonized central）TVD 限制器：`minmod(中心差分, 2Δ₋, 2Δ₊)`；三者同号取绝对值最小并保号，否则 0 |
@@ -1052,6 +1053,8 @@ NavierStokes1D(
 | `_clip_state(state, area_ref)` | 面积下限钳位（`MINIMUM_AREA_RATIO`） |
 | `_stable_timestep(state)` | CFL 自适应时间步 |
 | `_ssp_rk2_step(dt)` | 单步 SSP-RK2 推进 |
+| `pressure_extrema_mmhg(cycle_s=None, cache=True)` | 末段一个心动周期的入口/出口压力峰谷（收缩压/舒张压类比），返回字典并缓存到 `self.pressure_extrema`（§9.4） |
+| `print_pressure_extrema(cycle_s=None)` | 打印上一条的 SBP/DBP/脉压；返回同一字典 |
 
 `OutletWindkesselState` 内部方法：`reset()`、`lumen_pressure()`、`flow_from_lumen_pressure()`（除以构造时已钉下限的 \(R_p\)）、`apply_substep()` / `advance()`（流量驱动，返回 \(P_{\mathrm{lumen}}\)；微循环项 \(P_{\mathrm{wk}}/R_d\) 仅出现在 ODE 右端）、`apply_substep_from_pressure()` / `advance_from_pressure()`（压力驱动，用于侧支）。\(R_p,R_d\) 在 `__init__` 一次性 `max(..., 1e-9)`。
 
@@ -1199,15 +1202,22 @@ np.savez(
 
 ### 10.3 `ffr_ratio()`
 
-当前实现为**简化指标**：
+`ffr_ratio(warmup_fraction=0.5) -> ndarray`，形状 `(nx,)`。当前实现为**简化指标**，以**入口点 \(p(0)\)** 为归一化基准：
 
 \[
-\text{ratio} = \frac{\langle p \rangle_{x,\,t}}{p_{\mathrm{mean}}(x=0)}
+\text{FFR}(x_i) = \operatorname{clip}\!\left(\frac{\langle p(x_i) \rangle_t}{\langle p(x=0) \rangle_t},\ 0,\ 1\right),
+\qquad
+\langle p(x_i)\rangle_t = \frac{\int_{t_0}^{t_{\mathrm{end}}} p(x_i,t)\,\mathrm{d}t}{t_{\mathrm{end}}-t_0}
 \]
 
-其中 \(\langle p \rangle_{x,\,t}\) 为各网格点在**全部保存时刻**上的时间平均管腔标量压，再与入口网格平均压之比（见源码：先 `mean(history_pressure, axis=0)`，再除以 `p_mean[0]`）。比较的是**沿 \(x\) 不同位置**的 \(p\)，非某一方向的应力分量。
+- 分子 \(\langle p(x_i)\rangle_t\)：第 \(i\) 个网格点的**时间积分均值**（`integral_mean`，梯形法）。
+- 分母 \(\langle p(0)\rangle_t\)：同一时间窗内**入口节点** \(x=0\) 的时间积分均值。
+- 时间窗 \(t_0\) = `warmup_fraction · t_end`：默认 0.5，即只用后一半时程，排除起始瞬态。
+- 结果截断到 \([0,1]\)：理论上沿程压力单调不增，故比值 \(\le 1\)；钳位只用于兜住数值噪声。
 
-> 与临床导管 FFR（远端/主动脉压比）定义不同，仅用于模型内相对比较；正式分析建议自定义近端/远端分区或取狭窄远心端网格。
+**与早期实现的差异**：早期版本分母取**近端参考点** \(\langle p(\mathrm{prox\_idx})\rangle_t\)。因入口压通常略高于近端参考压（`prox_idx` 在 MLA 近侧、存在局部压降），改用 \(p(0)\) 后同一算例的 FFR 会整体略低（如 `mid_bulge` 的 `ffr_min` 由 0.8927 变为 0.8884）。改动的理由是：\(x=0\) 是物理边界、定义无歧义；`prox_idx` 依赖狭窄检测结果，几何一变基准点就漂移。
+
+> 与临床导管 FFR（狭窄远端/主动脉压比）定义不同，仅用于模型内相对比较；正式分析建议自定义近端/远端分区或取狭窄远心端网格。
 
 ---
 
@@ -1287,7 +1297,7 @@ Q_{\mathrm{in}}(t)=Q\bigl(t;\,f_{\mathrm{cor}}\cdot q_{\mathrm{scale}}\bigr)
 **算法**（`calibrate_q_scale_to_inlet_peak`）：
 
 1. 每次用当前 `q_scale` 构造 `NavierStokes1D` 并完整 `run()`。
-2. 用 `inlet_pressure_peak_mmhg` 取末段一个心动周期的 \(\max p(0,t)\)。
+2. 用 `NavierStokes1D.pressure_extrema_mmhg()` 取末段一个心动周期的 \(\max p(0,t)\)（即 `p_in_systolic`）。
 3. 目标开区间 \((p_{\mathrm{lo}},p_{\mathrm{hi}})\)（`example` 默认 \((90,105)\,\mathrm{mmHg}\)）：
    - 峰值 \(\ge p_{\mathrm{hi}}\) → 流量过大，搜索上界 `hi ← q_scale`；
    - 峰值 \(\le p_{\mathrm{lo}}\) → 流量过小，搜索下界 `lo ← q_scale`；
@@ -1409,7 +1419,7 @@ A：`demo/` 为旧原型（不同边界类与 import 路径）。新项目请只
 A：1 mL = 1 cm³，数值可直接作为 cm³/s 使用。
 
 **Q：`run()` 后 `ffr_ratio()` 大于 1？**  
-A：可能尚未达到周期稳态，或指标定义与临床 FFR 不同；延长 `duration_s` 或用 `prox_idx`/远端网格自定义压比（`demo()` 中有按近端参考归一的示例）。
+A：可能尚未达到周期稳态，或指标定义与临床 FFR 不同。当前 `ffr_ratio()` 以入口 \(p(0)\) 为分母并把结果钳到 \([0,1]\)，正常不会超过 1；若见到 >1 说明用了自定义压比。要换成别的基准（如狭窄远心端 / 近端参考点），可自行用 `solver.prox_idx` 与 `solver.history_pressure` 计算：`p_mean / p_mean[solver.prox_idx]`。延长 `duration_s` 通常能改善周期稳定性。
 
 **Q：如何改入口波形？**  
 A：修改 `BloodFlowParameters` 中心输出量、冠脉比例、傅里叶系数等；细节见 [`coronary_inlet_说明.md`](coronary_inlet_说明.md)。若只想缩放有效入口流量而不改生理分流比语义，改 `q_scale`（或跑 `calibrate_q_scale_to_inlet_peak`）。

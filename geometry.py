@@ -133,6 +133,7 @@ def smooth_axial_area(
     areas: np.ndarray,
     stenosis_segment: StenosisSegment,
     *,
+    only_smooth: bool = False,
     sigma_nodes: float = 4.0,
 ) -> np.ndarray:
     """按狭窄近/远端参考分段重构管腔面积，再整段高斯平滑。
@@ -164,23 +165,24 @@ def smooth_axial_area(
 
     out = a0.copy()
 
-    # ---- 近端：在 [0, prox) 搜最大 ⇒ id1 < prox，必做插值 ----
-    if prox > 0:
-        id1 = int(np.argmax(a0[0:prox]))
-        a_id1 = float(a0[id1])
-        a_prox = float(a0[prox])
-        out[0 : id1 + 1] = a_id1
-        x = np.arange(id1, prox + 1, dtype=float)
-        out[id1 : prox + 1] = np.interp(x, [id1, prox], [a_id1, a_prox])
+    if not only_smooth:
+        # ---- 近端：在 [0, prox) 搜最大 ⇒ id1 < prox，必做插值 ----
+        if prox > 0:
+            id1 = int(np.argmax(a0[0:prox]))
+            a_id1 = float(a0[id1])
+            a_prox = float(a0[prox])
+            out[0 : id1 + 1] = a_id1
+            x = np.arange(id1, prox + 1, dtype=float)
+            out[id1 : prox + 1] = np.interp(x, [id1, prox], [a_id1, a_prox])
 
-    # ---- 远端：在 (dist, n-1] 搜最大 ⇒ id2 > dist，必做插值 ----
-    if dist < n - 1:
-        id2 = dist + 1 + int(np.argmax(a0[dist + 1 : n]))
-        a_dist = float(a0[dist])
-        a_id2 = float(a0[id2])
-        x = np.arange(dist, id2 + 1, dtype=float)
-        out[dist : id2 + 1] = np.interp(x, [dist, id2], [a_dist, a_id2])
-        out[id2:n] = a_id2
+        # ---- 远端：在 (dist, n-1] 搜最大 ⇒ id2 > dist，必做插值 ----
+        if dist < n - 1:
+            id2 = dist + 1 + int(np.argmax(a0[dist + 1 : n]))
+            a_dist = float(a0[dist])
+            a_id2 = float(a0[id2])
+            x = np.arange(dist, id2 + 1, dtype=float)
+            out[dist : id2 + 1] = np.interp(x, [dist, id2], [a_dist, a_id2])
+            out[id2:n] = a_id2
 
     return gaussian_filter1d(out, sigma=float(sigma_nodes), mode="nearest")
 
