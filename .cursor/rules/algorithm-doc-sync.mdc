@@ -1,6 +1,6 @@
 ---
 description: 修改算法模块时必须同步更新 docs/navier_stokes_1d.md
-globs: navier_stokes_1d.py,geometry.py,branch.py,coronary_inlet.py,coronary_outlet.py,coronary_constants.py
+globs: SimuCoronary/navier_stokes_1d.py,SimuCoronary/geometry.py,SimuCoronary/branch.py,SimuCoronary/coronary_inlet.py,SimuCoronary/coronary_outlet.py,SimuCoronary/coronary_constants.py
 alwaysApply: false
 ---
 
@@ -42,8 +42,8 @@ alwaysApply: false
 核对方法：
 
 ```bash
-python -c "from navier_stokes_1d import BloodFlowParameters as B; print(B())"
-python -c "import coronary_constants as c; print(c.MINIMUM_AREA_RATIO, c.P_INLET_REF_MMHG)"
+python -c "from SimuCoronary.navier_stokes_1d import BloodFlowParameters as B; print(B())"
+python -c "import SimuCoronary.coronary_constants as c; print(c.MINIMUM_AREA_RATIO, c.P_INLET_REF_MMHG)"
 ```
 
 ## 记录决策依据
@@ -53,8 +53,10 @@ python -c "import coronary_constants as c; print(c.MINIMUM_AREA_RATIO, c.P_INLET
 
 ## 适用模块
 
-本规则的 `globs` 覆盖 `navier_stokes_1d.py`、`geometry.py`、`branch.py`、
-`coronary_inlet.py`、`coronary_outlet.py`、`coronary_constants.py`。
+本规则的 `globs` 覆盖 `SimuCoronary/navier_stokes_1d.py`、
+`SimuCoronary/geometry.py`、`SimuCoronary/branch.py`、
+`SimuCoronary/coronary_inlet.py`、`SimuCoronary/coronary_outlet.py`、
+`SimuCoronary/coronary_constants.py`。
 
 改动上述任一文件后，若 `docs/navier_stokes_1d.md` 未随之更新，
 **应主动补文档，不要等用户要求**。

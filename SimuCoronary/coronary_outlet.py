@@ -18,8 +18,8 @@ RCR 是唯一出口模型；若需要二元行为，令 R_p = 0 即可，无需�
 
 import numpy as np
 
-from coronary_constants import DEFAULT_PROXIMAL_FRACTION, P_INLET_REF_MMHG
-from coronary_inlet import coronary_inlet_flow
+from .coronary_constants import DEFAULT_PROXIMAL_FRACTION, P_INLET_REF_MMHG
+from .coronary_inlet import coronary_inlet_flow
 
 # 默认微循环参数（以下划线开头的常量仅在本模块内使用）
 _DEFAULT_C_ML_PER_MMHG = 0.012

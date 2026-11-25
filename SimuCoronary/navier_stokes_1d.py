@@ -69,17 +69,17 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from branch import prepare_side_branches
-from calibration_cache import iteration_snapshot, save_calibration_cache
-from coronary_constants import (
+from .branch import prepare_side_branches
+from .calibration_cache import iteration_snapshot, save_calibration_cache
+from .coronary_constants import (
     DEFAULT_PROXIMAL_FRACTION,
     MINIMUM_AREA_RATIO,
     MINIMUM_INLET_FLOW_ML_S,
     P_INLET_REF_MMHG,
     rho_for_mmhg_pressure_coupling,
 )
-from coronary_inlet import coronary_inlet_flow
-from geometry import build_stenosis_segment, smooth_axial_area, resample_axial_profile
+from .coronary_inlet import coronary_inlet_flow
+from .geometry import build_stenosis_segment, smooth_axial_area, resample_axial_profile
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1079,18 @@ class NavierStokes1D:
             self.history_time,
         )
 
+    def generate_virtual_stent(self):
+        """
+        基于初始化的血管面积，和识别到的狭窄，假设近端参考段和远端参考段之间的狭窄
+        通过支架而缓解，重新生成的血管面积，即假设虚拟支架缓解了狭窄的情况后，再进行虚拟FFR的计算。
+        使用时，先运行该接口，再运行run()即可。
+        """
+        # TODO 
+        # placeholder
+
+        pass
+
+
     def pressure_extrema_mmhg(
         self,
         cycle_s: float | None = None,
@@ -1553,100 +1565,6 @@ class NavierStokes1D:
         return fig
 
 
-def run_uniform_tube_mass_check(
-    nx: int = 200,
-    length_cm: float = 5.8,
-    area_cm2: float = 0.056729,
-    duration_s: float = 2.4,
-    cardiac_output_l_per_min: float = 5.0,
-    verbose: bool = False,
-) -> dict[str, float]:
-    """方向 A：等截面直管、无侧支、无狭窄上的质量守恒检查。
-
-    几何取当前狭窄算例的长度与近端参考面积量级。若 ``mass_err`` 相对
-    ``Q_in`` 可忽略，则泄漏不是通用离散或边界通量的共性缺陷。
-    """
-    paras = BloodFlowParameters(cardiac_output_l_per_min=cardiac_output_l_per_min)
-    solver = NavierStokes1D(
-        np.full(int(nx), float(area_cm2)),
-        float(length_cm),
-        paras,
-    )
-    solver.run(duration_s=duration_s, record_interval_steps=8, verbose=verbose)
-    report = solver.mass_balance(cycle_s=60.0 / paras.heart_rate_bpm)
-    wp = solver.wellposedness_diagnostics(
-        warmup_fraction=max(0.0, 1.0 - (60.0 / paras.heart_rate_bpm) / duration_s)
-    )
-    report["lam_minus_max"] = float(wp["lam_minus_max"])
-    report["n_choked"] = float(wp["n_choked"])
-    report["n_lesion"] = float(len(solver.lesions))
-    report["n_branch"] = float(len(solver.side_branches))
-    print(
-        f"[uniform tube] Q_in={report['q_in']:.6f} Q_out={report['q_out']:.6f} "
-        f"mass_err={report['mass_err']:.3e} dV/dt={report['dvdt']:.3e} "
-        f"lam- max={report['lam_minus_max']:+.4f}, n_choked={int(report['n_choked'])}"
-    )
-    return report
-
-
-def roi_process(roi_idx, area, branch_idx, branch_d):
-    """按 ROI 下标裁剪面积与侧支。
-
-    Parameters
-    ----------
-    roi_idx :
-        ROI 在原始序列中的下标列表，例如 ``[0, 1, ..., 199]`` 或任意子集
-        （须为 ``area`` 的合法下标）。
-    area :
-        原始沿程截面积，形状 ``(nx,)``
-    branch_idx, branch_d :
-        原始网格上的侧支开口下标与直径；等长
-
-    Returns
-    -------
-    area_roi, branch_idx_roi, branch_d_roi
-        - ``area_roi``：按 ``roi_idx`` 顺序取出的面积
-        - 落在 ROI 内的侧支下标映射为 ROI 内局部下标（``enumerate(roi_idx)``）；
-          不在 ROI 内的侧支删除
-    """
-    roi = np.asarray(roi_idx, dtype=int).ravel()
-    area_arr = np.asarray(area, dtype=float).ravel()
-    nx = int(area_arr.shape[0])
-    if roi.size == 0:
-        raise ValueError("roi_idx 不能为空")
-    if np.any(roi < 0) or np.any(roi >= nx):
-        raise ValueError(f"roi_idx 须落在 [0, {nx})，当前范围 [{roi.min()}, {roi.max()}]")
-
-    area_roi = area_arr[roi].copy()
-    old_to_new = {int(old): int(new) for new, old in enumerate(roi)}
-
-    idxs = list(branch_idx) if branch_idx is not None else []
-    diams = list(branch_d) if branch_d is not None else []
-    if len(idxs) != len(diams):
-        raise ValueError(
-            f"branch_idx 与 branch_d 长度须一致 ({len(idxs)} vs {len(diams)})"
-        )
-
-    branch_idx_roi: list[int] = []
-    branch_d_roi: list[float] = []
-    dropped = 0
-    for i, d in zip(idxs, diams):
-        old_i = int(i)
-        if old_i in old_to_new:
-            branch_idx_roi.append(old_to_new[old_i])
-            branch_d_roi.append(float(d))
-        else:
-            dropped += 1
-
-    if dropped:
-        print(
-            f"roi_process: drop {dropped} branch(es) outside ROI; "
-            f"kept {len(branch_idx_roi)}, area nx {nx} → {len(area_roi)}"
-        )
-    return area_roi, branch_idx_roi, branch_d_roi
-
-
-
 def calibrate_q_scale_to_inlet_peak(
     area_cm2: np.ndarray | list,
     vessel_length_cm: float,
@@ -1656,12 +1574,12 @@ def calibrate_q_scale_to_inlet_peak(
     branch_diameters_cm: Optional[Sequence[float]] = None,
     apply_murray_scale: bool = True,
     duration_s: float = 3.0,
-    record_interval_steps: int = 30,
-    peak_lo_mmhg: float = 90.0,
-    peak_hi_mmhg: float = 105.0,
+    record_interval_steps: int = 20,
+    peak_lo_mmhg: float = 95.0,
+    peak_hi_mmhg: float = 125.0,
     q_scale_min: float = 0.05,
-    q_scale_max: float = 2.0,
-    max_iters: int = 5,
+    q_scale_max: float = 3.0,
+    max_iters: int = 10,
     verbose: bool = True,
     cache_dir: str | None = None,
 ) -> tuple["NavierStokes1D", dict]:
@@ -1671,7 +1589,7 @@ def calibrate_q_scale_to_inlet_peak(
     假定定流量入口下峰值压随流量近似单调：峰值过高则减小 ``q_scale``，过低则增大。
 
     若给定 ``cache_dir``，每次迭代写入 ``iter_XX.npz`` + ``summary.json``；
-    事后读图用 ``python calibration_cache.py <cache_dir>``。
+    事后读图用 ``python -m SimuCoronary.calibration_cache <cache_dir>``。
 
     Returns
     -------

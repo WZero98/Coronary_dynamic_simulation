@@ -1,6 +1,6 @@
-# `coronary_outlet.py` 使用说明
+# `SimuCoronary/coronary_outlet.py` 使用说明
 
-本文档说明冠状动脉**出口管腔内压力**边界条件模块 `coronary_outlet.py` 的物理模型、单位约定、函数 API 与典型用法。该模块以脉动流量 \(Q(t)\) 驱动 **三元（RCR）** Windkessel 电路，数值积分得到出口压力时间序列 \(P_{\mathrm{out}}(t)\)，供 1D/0D 耦合或后处理使用。
+本文档说明冠状动脉**出口管腔内压力**边界条件模块 `SimuCoronary/coronary_outlet.py` 的物理模型、单位约定、函数 API 与典型用法。该模块以脉动流量 \(Q(t)\) 驱动 **三元（RCR）** Windkessel 电路，数值积分得到出口压力时间序列 \(P_{\mathrm{out}}(t)\)，供 1D/0D 耦合或后处理使用。
 
 ---
 
@@ -22,7 +22,7 @@
 
 ## 1. 概述
 
-`coronary_outlet.py` 用于生成**某段冠状动脉出口处**管腔内压力随时间变化的边界条件：
+`SimuCoronary/coronary_outlet.py` 用于生成**某段冠状动脉出口处**管腔内压力随时间变化的边界条件：
 
 | 模型 | 电路元件 | 出口压力定义 |
 |------|----------|--------------|
@@ -32,7 +32,7 @@
 > 均不再存在）。理由：二元只是三元的退化情形，令 \(R_p=0\) 即得
 > \(P_{\mathrm{out}} = P_{\mathrm{wk}}\)
 
-**驱动流量**默认来自同仓库 `coronary_inlet.py` 的 `coronary_inlet_flow`（傅里叶级数生理波形）；也可传入任意与 `t` 等长的 `q_in` 数组。
+**驱动流量**默认来自同仓库 `SimuCoronary/coronary_inlet.py` 的 `coronary_inlet_flow`（傅里叶级数生理波形）；也可传入任意与 `t` 等长的 `q_in` 数组。
 
 **静脉压**：不作为可调参数；电路出口按零压参考，\(R_d\) 由参考管腔压 \(P_{\mathrm{ref}}\) 与平均流量标定。
 
@@ -56,7 +56,7 @@
 | Python 3.10+（建议） | 类型注解 `float \| None` 等 |
 | `numpy` | 数组与 RK4 积分 |
 | `matplotlib` | `plot_coronary_outlet_pressure` 绘图（可选） |
-| `coronary_inlet.py` | 默认驱动流量 `coronary_inlet_flow` |
+| `SimuCoronary/coronary_inlet.py` | 默认驱动流量 `coronary_inlet_flow` |
 | `demo/units.py` | 参考动脉压常量 `P_INLET_REF_MMHG` |
 
 安装示例：
@@ -70,7 +70,7 @@ pip install numpy matplotlib
 ```bash
 # Windows PowerShell
 $env:MPLBACKEND='Agg'
-python coronary_outlet.py
+python -m SimuCoronary.coronary_outlet
 ```
 
 ---
@@ -104,7 +104,7 @@ P_{\mathrm{out}}(t) = P_{\mathrm{wk}}(t) + R_p\, Q(t)
 
 `demo/outlet_boundary_condition.RCWindkesselMurrayOutletBC` 在 **1D 求解器每个时间步**内联更新 Windkessel 状态，并叠加 Murray 流量分配与血压匹配。
 
-`coronary_outlet.py` 则提供**离线、批量**的压力曲线生成，便于：
+`SimuCoronary/coronary_outlet.py` 则提供**离线、批量**的压力曲线生成，便于：
 
 - 预先构造 Dirichlet 压力边界 \(P_{\mathrm{out}}(t)\)
 - 与入口流量波形对比、标定参数
@@ -158,7 +158,7 @@ R_p = 0.1 \times R_d
 
 ```python
 import numpy as np
-from coronary_outlet import coronary_outlet_pressure
+from SimuCoronary.coronary_outlet import coronary_outlet_pressure
 
 t = np.linspace(0, 6, 4800)  # 6 s，约 800 Hz 采样
 p_out, p_wk = coronary_outlet_pressure(
@@ -187,8 +187,8 @@ p_out, p_wk = coronary_outlet_pressure(
 ### 5.3 自定义流量驱动
 
 ```python
-from coronary_inlet import coronary_inlet_flow
-from coronary_outlet import windkessel3_outlet_pressure
+from SimuCoronary.coronary_inlet import coronary_inlet_flow
+from SimuCoronary.coronary_outlet import windkessel3_outlet_pressure
 
 q = coronary_inlet_flow(t, heart_rate=60, coronary_fraction=0.04)
 p_out, p_wk = windkessel3_outlet_pressure(t, q, compliance_ml_per_mmhg=0.05)
@@ -197,7 +197,7 @@ p_out, p_wk = windkessel3_outlet_pressure(t, q, compliance_ml_per_mmhg=0.05)
 ### 5.4 统计与绘图
 
 ```python
-from coronary_outlet import coronary_outlet_pressure_stats, plot_coronary_outlet_pressure
+from SimuCoronary.coronary_outlet import coronary_outlet_pressure_stats, plot_coronary_outlet_pressure
 
 stats = coronary_outlet_pressure_stats(
     heart_rate=75,
@@ -251,7 +251,7 @@ windkessel3_outlet_pressure(
 
 ```python
 import numpy as np
-from coronary_outlet import windkessel3_outlet_pressure
+from SimuCoronary.coronary_outlet import windkessel3_outlet_pressure
 
 t = np.linspace(0, 2, 2000)
 q = 2.5 * (1 + 0.6 * np.sin(2 * np.pi * t))  # 示意脉动流量
@@ -487,9 +487,9 @@ windkessel3_outlet_pressure(t, q, p_wk_init_mmhg=75.0)
 
 本模块输出的是**标量出口边界** \(P_{\mathrm{out}}(t)\) 或 Windkessel 参数约定，不含空间分布。
 
-### 9.1 与 `navier_stokes_1d.py`（推荐）
+### 9.1 与 `SimuCoronary/navier_stokes_1d.py`（推荐）
 
-根目录 **`navier_stokes_1d.py`** 已在线耦合 Windkessel + tube law：
+`SimuCoronary` 包内的 **`navier_stokes_1d.py`** 已在线耦合 Windkessel + tube law：
 
 | 角色 | 实现 |
 |------|------|
@@ -502,7 +502,7 @@ windkessel3_outlet_pressure(t, q, p_wk_init_mmhg=75.0)
 
 ### 9.2 与 `demo/navier_stokes.py`（早期原型）
 
-`demo/` 为旧原型，接口不同，**勿与根目录求解器混用**。历史上常见两种方式：
+`demo/` 为旧原型，接口不同，**勿与 `SimuCoronary` 包内求解器混用**。历史上常见两种方式：
 
 1. **Dirichlet 压力边界**  
    将 `P_out(t)` 插值到求解器时间步，在出口施加管腔压；截面积由 tube law 反解。
@@ -519,7 +519,7 @@ windkessel3_outlet_pressure(t, q, p_wk_init_mmhg=75.0)
 直接运行：
 
 ```bash
-python coronary_outlet.py
+python -m SimuCoronary.coronary_outlet
 ```
 
 将依次：
@@ -593,6 +593,6 @@ p_out, p_wk = windkessel3_outlet_pressure(t, q, r_proximal_mmhg_s_per_ml=0.0)
 | `coronary_outlet_pressure_stats(...)` | 周期数 `duration_cycles` | `dict` 统计 |
 | `plot_coronary_outlet_pressure(...)` | 绘图时长 `duration_s` | 无（显示图形） |
 
-相关文档：`coronary_inlet.py`（入口流量）、`demo/units.py`（参考压常量）、`demo/outlet_boundary_condition.py`（1D 求解器联立 Windkessel，含静脉压）。
+相关文档：`SimuCoronary/coronary_inlet.py`（入口流量）、`demo/units.py`（参考压常量）、`demo/outlet_boundary_condition.py`（1D 求解器联立 Windkessel，含静脉压）。
 
 

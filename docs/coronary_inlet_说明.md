@@ -1,6 +1,6 @@
-# 冠状动脉入口流量模块说明（`coronary_inlet.py`）
+# 冠状动脉入口流量模块说明（`SimuCoronary/coronary_inlet.py`）
 
-本文档说明 `coronary_inlet.py` 中主要函数、参数含义及调节方法，重点介绍**生理模板**如何塑造冠脉入口波形，以及模板参数与傅里叶拟合、最终流量输出之间的关系。
+本文档说明 `SimuCoronary/coronary_inlet.py` 中主要函数、参数含义及调节方法，重点介绍**生理模板**如何塑造冠脉入口波形，以及模板参数与傅里叶拟合、最终流量输出之间的关系。
 
 ---
 
@@ -12,7 +12,7 @@
 2. **傅里叶拟合** `fit_fourier_coefficients`：将模板分解为有限项正弦谐波，得到系数 \((n, \text{amp\_ratio}, \text{phase})\)。
 3. **入口流量** `coronary_inlet_flow`：按心率、心输出量等将归一化波形放大为物理流量，并施加非负约束。
 
-在 1D 求解器 **`navier_stokes_1d.py`** 中，通过 `BloodFlowParameters.inlet_flow(t)` 调用 `coronary_inlet_flow` 作为入口边界（定流量 \(Q(0,t)=Q_{\mathrm{in}}(t)\)）。`coronary_outlet.py` 在未提供 `q_in` 时亦默认调用本模块生成驱动流量。CGS 单位下 **1 mL = 1 cm³**，数值可与 cm³/s 直接对接。
+在 1D 求解器 **`SimuCoronary/navier_stokes_1d.py`** 中，通过 `BloodFlowParameters.inlet_flow(t)` 调用 `coronary_inlet_flow` 作为入口边界（定流量 \(Q(0,t)=Q_{\mathrm{in}}(t)\)）。`SimuCoronary/coronary_outlet.py` 在未提供 `q_in` 时亦默认调用本模块生成驱动流量。CGS 单位下 **1 mL = 1 cm³**，数值可与 cm³/s 直接对接。
 
 > **注意**：`coronary_inlet_flow` 与 `BloodFlowParameters` 的**默认值不完全相同**，求解器中以 `BloodFlowParameters` 为准：
 
@@ -52,7 +52,7 @@ Q_{\text{mean}} = \frac{\text{cardiac\_output} \times 1000 \times \text{coronary
 - **早期收缩峰 / 舒张峰** 由 `systolic_to_diastolic_peak_ratio` 设定（当前默认 **0.65**）
 - 收缩期末流量高于收缩晚期局部低点（融合，非“先探底再跳升”）
 
-**当前默认参数下的典型指标**（`python coronary_inlet.py` 或下列调用可复现）：
+**当前默认参数下的典型指标**（`python -m SimuCoronary.coronary_inlet` 或下列调用可复现）：
 
 | 指标 | 模板层 `template_peak_metrics` | 傅里叶重建 `coronary_inlet_flow_stats` |
 |------|-------------------------------|----------------------------------------|
@@ -210,7 +210,7 @@ coronary_flow_template(
 3. **再定脉动**：用 `coronary_inlet_flow_stats` 看 **PI**，通过 `baseline_level`、`diastolic_peak` 微调至 0.9–1.3。
 4. **重拟合谐波**：
    ```python
-   from coronary_inlet import fit_fourier_coefficients, coronary_inlet_flow
+   from SimuCoronary.coronary_inlet import fit_fourier_coefficients, coronary_inlet_flow
 
    coeffs = tuple(fit_fourier_coefficients(
        n_harmonics=7,
@@ -368,7 +368,7 @@ coronary_inlet_flow_stats(
 运行：
 
 ```bash
-python coronary_inlet.py
+python -m SimuCoronary.coronary_inlet
 ```
 
 `__main__` 会打印当前模板拟合的傅里叶系数、`template_peak_metrics`，并调用 `plot_coronary_flow`（示例使用 `coronary_fraction=0.03`）。
@@ -379,7 +379,7 @@ python coronary_inlet.py
 ### 11.1 检查模板是否满足峰比与融合
 
 ```python
-from coronary_inlet import template_peak_metrics, coronary_inlet_flow_stats
+from SimuCoronary.coronary_inlet import template_peak_metrics, coronary_inlet_flow_stats
 
 m = template_peak_metrics()
 print(f"峰比={m['peak_ratio']:.2%}, 融合={m['flow_at_systole_end'] > m['pre_systole_end_local_min']}")
@@ -392,7 +392,7 @@ print(f"PI={s['pulsatility_index']:.2f}, Q_mean={s['Q_mean_mL_s']:.2f} mL/s")
 
 ```python
 import numpy as np
-from coronary_inlet import fit_fourier_coefficients, coronary_inlet_flow
+from SimuCoronary.coronary_inlet import fit_fourier_coefficients, coronary_inlet_flow
 
 template_kw = dict(
     systolic_to_diastolic_peak_ratio=0.65,
@@ -411,7 +411,7 @@ Q = coronary_inlet_flow(t, heart_rate=75, fourier_coefficients=coeffs)
 通过 `BloodFlowParameters` 传入，由求解器 `_apply_boundaries` 在 \(x=0\) 施加 \(Q(0,t)=Q_{\mathrm{in}}(t)\)：
 
 ```python
-from navier_stokes_1d import BloodFlowParameters, NavierStokes1D
+from SimuCoronary.navier_stokes_1d import BloodFlowParameters, NavierStokes1D
 
 par = BloodFlowParameters(
     heart_rate_bpm=75.0,
@@ -439,7 +439,7 @@ Q_in = par.inlet_flow(t)
 初值：构造 `NavierStokes1D` 时沿程流量初值取 `Q_in(0)`（含 `q_scale`），与入口 BC 对齐。
 ---
 
-## 12. 默认常量速查（`coronary_inlet.py` 当前版本）
+## 12. 默认常量速查（`SimuCoronary/coronary_inlet.py` 当前版本）
 
 ### 12.1 模板参数
 
@@ -468,7 +468,7 @@ Q_in = par.inlet_flow(t)
 | 6 | 0.025276 | -0.512057 |
 | 7 | 0.021691 | -1.037171 |
 
-修改 `_DEFAULT_*` 模板常量后，应运行 `python coronary_inlet.py` 或 `fit_fourier_coefficients()` 重新生成系数并更新源码中的元组（或仅在调用处传入新 `fourier_coefficients`）。
+修改 `_DEFAULT_*` 模板常量后，应运行 `python -m SimuCoronary.coronary_inlet` 或 `fit_fourier_coefficients()` 重新生成系数并更新源码中的元组（或仅在调用处传入新 `fourier_coefficients`）。
 
 ### 12.3 默认参数下的校验指标（HR=75, CO=5 L/min, fraction=0.045）
 
@@ -493,11 +493,11 @@ Q_in = par.inlet_flow(t)
 
 ```text
 FFR_1D/
-├── coronary_inlet.py           # 本模块 ★
-├── docs/coronary_inlet_说明.md # 本文档
-├── navier_stokes_1d.py         # 1D 求解器（BloodFlowParameters.inlet_flow）
-├── coronary_outlet.py          # 出口 Windkessel（默认 q_in 来自本模块）
-└── coronary_constants.py       # 共享常量（P_ref 等）
+└── SimuCoronary/
+    ├── coronary_inlet.py           # 本模块 ★
+    ├── navier_stokes_1d.py         # 1D 求解器（BloodFlowParameters.inlet_flow）
+    ├── coronary_outlet.py          # 出口 Windkessel（默认 q_in 来自本模块）
+    └── coronary_constants.py       # 共享常量（P_ref 等）
 ```
 
 **数据流（耦合求解）**：
@@ -510,4 +510,4 @@ BloodFlowParameters  →  inlet_flow(t)  →  coronary_inlet_flow(...)
 
 ---
 
-*文档版本：与 `coronary_inlet.py` 分段模板 + 傅里叶拟合实现对应；与 `navier_stokes_1d.BloodFlowParameters` 入口封装同步。若代码默认常量更新，请同步修改 §12。*
+*文档版本：与 `SimuCoronary/coronary_inlet.py` 分段模板 + 傅里叶拟合实现对应；与 `navier_stokes_1d.BloodFlowParameters` 入口封装同步。若代码默认常量更新，请同步修改 §12。*

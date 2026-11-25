@@ -8,11 +8,11 @@ q_scale 标定迭代的缓存读写与事后绘图。
 ----
 ::
 
-    python calibration_cache.py data/cache/q_scale_cal_stenoses_nx200_T3.00
+    python -m SimuCoronary.calibration_cache data/cache/q_scale_cal_stenoses_nx200_T3.00
 
 或::
 
-    from calibration_cache import load_calibration_cache, plot_calibration_iterations
+    from SimuCoronary.calibration_cache import load_calibration_cache, plot_calibration_iterations
     cal = load_calibration_cache(r"data/cache/...")
     plot_calibration_iterations(cal)
 """

@@ -1,6 +1,6 @@
 # 方向 B：特征变量（Riemann 不变量）边界 — 数学原理与实现说明
 
-本文整理 `navier_stokes_1d.py` 中方向 B 的边界改进：由「面积零梯度 / 出口仅定压改 $A$」改为**特征相容边界**（characteristic-compatible / non-reflecting in the weak sense of Riemann invariants）。实现入口为 `_apply_boundaries`；配套函数为 `_characteristic_speeds`、`_riemann_invariants`、`area_from_flow_and_w_minus`、`_outlet_flow_from_w_plus`。算法摘要亦见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §5；诊断背景见 [`当前算例问题与改进方向.md`](当前算例问题与改进方向.md) §8.2。
+本文整理 `SimuCoronary/navier_stokes_1d.py` 中方向 B 的边界改进：由「面积零梯度 / 出口仅定压改 $A$」改为**特征相容边界**（characteristic-compatible / non-reflecting in the weak sense of Riemann invariants）。实现入口为 `_apply_boundaries`；配套函数为 `_characteristic_speeds`、`_riemann_invariants`、`area_from_flow_and_w_minus`、`_outlet_flow_from_w_plus`。算法摘要亦见 [`navier_stokes_1d.md`](navier_stokes_1d.md) §5；诊断背景见 [`当前算例问题与改进方向.md`](当前算例问题与改进方向.md) §8.2。
 
 > **读者背景**：假定已掌握线性代数（特征值 / 对角化）、数学分析（偏导数与链式法则）与常微分方程（初值问题）。**不**假定已学过偏微分方程或双曲守恒律。§0 从该背景出发，系统给出一阶双曲方程、特征线与黎曼不变量的定义与直观；§1 起回到本仓库的边界问题。
 >

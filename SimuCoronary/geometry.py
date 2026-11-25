@@ -19,9 +19,8 @@ class StenosisSegment:
     mla_area_cm2: float  # 最小管腔面积
 
 
-# 首尾各排除帧数（固定）；参考帧距 MLA 上限 10 mm = 1.0 cm
-_END_EXCLUDE_FRAMES = 5
-_MAX_REF_DISTANCE_CM = 1.0
+_END_EXCLUDE_FRAMES = 5  # MLA搜索时，首尾各排除帧数（固定）
+_MAX_REF_DISTANCE_CM = 5.0  # 参考帧距 MLA 上限 (cm)
 
 
 def find_mla_index(
@@ -134,7 +133,8 @@ def smooth_axial_area(
     stenosis_segment: StenosisSegment,
     *,
     only_smooth: bool = False,
-    sigma_nodes: float = 4.0,
+    sigma_nodes: float = 2.0,
+    only_padding_max: bool = True,
 ) -> np.ndarray:
     """按狭窄近/远端参考分段重构管腔面积，再整段高斯平滑。
 
@@ -148,6 +148,15 @@ def smooth_axial_area(
       在 ``A[dist]`` 与 ``A[id2]`` 之间线性插值；``[id2, n-1]`` 常数填为 ``A[id2]``。
 
     最后对整段做 ``gaussian_filter1d(..., sigma=sigma_nodes, mode="nearest")``。
+    ---
+    Params:
+        areas: np.ndarray, 原始血管面积序列
+        stenosis_segment: StenosisSegment, 一段检测到的狭窄
+        only_smooth: bool, 是否只进行高斯平滑，而不进行插值
+        sigma_nodes: float, 高斯平滑的标准差
+        only_padding_max: bool, 是否只把近端``[0, prox]``常数填为 ``A[prox]``，``[dist, n-1]`` 常数填为 ``A[dist]``，而不进行插值，以尽量保留原始面积曲线
+    Returns:
+        np.ndarray: 平滑后的面积序列
     """
     from scipy.ndimage import gaussian_filter1d
 
@@ -158,6 +167,8 @@ def smooth_axial_area(
 
     prox = int(stenosis_segment.prox_ref_idx)
     dist = int(stenosis_segment.dist_ref_idx)
+    a_prox = float(a0[prox])
+    a_dist = float(a0[dist])
     if not (0 <= prox <= dist < n):
         raise ValueError(
             f"参考下标非法：prox={prox}, dist={dist}, n={n}"
@@ -166,23 +177,29 @@ def smooth_axial_area(
     out = a0.copy()
 
     if not only_smooth:
-        # ---- 近端：在 [0, prox) 搜最大 ⇒ id1 < prox，必做插值 ----
+        # ---- 近端 [0, prox) 填补或插值 ----
         if prox > 0:
-            id1 = int(np.argmax(a0[0:prox]))
-            a_id1 = float(a0[id1])
-            a_prox = float(a0[prox])
-            out[0 : id1 + 1] = a_id1
-            x = np.arange(id1, prox + 1, dtype=float)
-            out[id1 : prox + 1] = np.interp(x, [id1, prox], [a_id1, a_prox])
+            if only_padding_max:
+                out[0 : prox] = a_prox
+            # ---- 近端：在 [0, prox) 搜最大
+            else:
+                id1 = int(np.argmax(a0[0:prox]))
+                a_id1 = float(a0[id1])
+                out[0 : id1 + 1] = a_id1
+                x = np.arange(id1, prox + 1, dtype=float)
+                out[id1 : prox + 1] = np.interp(x, [id1, prox], [a_id1, a_prox])
 
-        # ---- 远端：在 (dist, n-1] 搜最大 ⇒ id2 > dist，必做插值 ----
+        # ---- 远端 (dist, n-1] 填补或插值 ----
         if dist < n - 1:
-            id2 = dist + 1 + int(np.argmax(a0[dist + 1 : n]))
-            a_dist = float(a0[dist])
-            a_id2 = float(a0[id2])
-            x = np.arange(dist, id2 + 1, dtype=float)
-            out[dist : id2 + 1] = np.interp(x, [dist, id2], [a_dist, a_id2])
-            out[id2:n] = a_id2
+            if only_padding_max:
+                out[dist: ] = a_dist
+            # ---- 远端：在 (dist, n-1] 搜最大
+            else:
+                id2 = dist + 1 + int(np.argmax(a0[dist + 1 : n]))
+                a_id2 = float(a0[id2])
+                out[id2:n] = a_id2
+                x = np.arange(dist, id2 + 1, dtype=float)
+                out[dist : id2 + 1] = np.interp(x, [dist, id2], [a_dist, a_id2])
 
     return gaussian_filter1d(out, sigma=float(sigma_nodes), mode="nearest")
 
@@ -286,8 +303,6 @@ def resample_axial_profile(
 
 
 if __name__ == "__main__":
-    from scipy.ndimage import gaussian_filter1d
-
     area = np.array([
         0.08, 0.078, 0.079, 0.081, 0.082, 0.076, 0.077, 0.075, 0.074, 0.073,
         0.072, 0.071, 0.070, 0.069, 0.068, 0.067, 0.066, 0.065, 0.064, 0.063,
