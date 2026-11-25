@@ -75,14 +75,14 @@ from SimuCoronary import NavierStokes1D, BloodFlowParameters
 from SimuCoronary.navier_stokes_1d import NavierStokes1D
 ```
 
-包内模块之间一律使用**相对导入**（如 `from .geometry import build_stenosis_segment`），因此不能再用 `python SimuCoronary/xxx.py` 直接跑脚本，需改为模块方式（见 §6.1）。
+包内模块之间一律使用**相对导入**（如 `from .geometry import build_stenosis_segment`），因此不能再用 `python SimuCoronary/xxx.py` 直接跑脚本。需要跑算例请用 `Scripts/experiment.py`（见 §6.1）。
 
 无图形界面时：
 
 ```bash
 # Windows PowerShell
 $env:MPLBACKEND = "Agg"
-python -m SimuCoronary.navier_stokes_1d
+python Scripts/experiment.py
 ```
 
 ---
@@ -765,10 +765,14 @@ outlet_proximal_fraction  →  R_p = fraction · R_d（若未显式给 Rp）
 ### 6.1 运行内置示例
 
 ```bash
-python -m SimuCoronary.navier_stokes_1d
+python Scripts/experiment.py
 ```
 
-默认入口调用 `example()`：读 `data/stenoses_data`，先用 `calibrate_q_scale_to_inlet_peak` 把入口峰值压收到目标窗，再 `plot_results_1()` 并打印 FFR。也可改 `__main__` 调用 `demo()`（单次 `run`，不标定缩放）。
+该脚本是**自包含的算例**：把仓库根加入 `sys.path` 后，读 `data/stenoses_data`，调用 `SimuCoronary.calculators.calibrate_q_scale_to_inlet_peak` 把入口峰值压收到目标窗，再 `plot_results_1()` 绘图、做质量校验并打印 FFR。数据与缓存路径都按**仓库根目录**解析，可在任意工作目录下运行。
+
+`example()` 定义在 `Scripts/experiment.py` 内，**不在包内**；`calculators.py` 只保留可复用的外环标定函数。
+
+`navier_stokes_1d.py` 是纯库，**没有** `__main__`；不要再尝试 `python -m SimuCoronary.navier_stokes_1d`。
 
 ### 6.2 最小脚本
 
@@ -798,7 +802,7 @@ solver.plot_results()          # matplotlib
 需要入口压落在生理窗时，用外环代替单次 `run`（见 §13.1）：
 
 ```python
-from SimuCoronary.navier_stokes_1d import calibrate_q_scale_to_inlet_peak
+from SimuCoronary.calculators import calibrate_q_scale_to_inlet_peak
 
 solver, cal = calibrate_q_scale_to_inlet_peak(area, L, par, duration_s=2.4)
 print(cal["q_scale"], cal["p_in_peak"], cal["converged"])
@@ -1004,7 +1008,7 @@ NavierStokes1D(
 | 方法 | 说明 |
 |------|------|
 | `plot_results()` | matplotlib 2×2：\(A(t,x)\)、沿程平均 \(Q\)、指定点 \(p(t)\)、末时刻 \(A\)/\(p\) |
-| `plot_results_1(show=True, renderer=None)` | Plotly 交互版同类四图；`demo()` 默认调用此接口 |
+| `plot_results_1(show=True, renderer=None)` | Plotly 交互版同类四图；`Scripts/experiment.py` 默认调用此接口 |
 
 ### 9.4 入口/出口收缩压–舒张压（`pressure_extrema`）
 
@@ -1042,15 +1046,15 @@ NavierStokes1D(
 | `area_from_flow_and_w_minus(Q, W−, ...)` | 入口：由定流量与出射不变量反解 \(A\) |
 | `_outlet_flow_from_w_plus(W+, ...)` | 出口：由出射不变量与 RCR 压力联立反解 \(Q\)；失败返回 `None` |
 | `run_uniform_tube_mass_check(...)` | 等截面直管、无侧支的质量守恒检查（方向 A） |
-| `calibrate_q_scale_to_inlet_peak(...)` | 外环二分标定 `q_scale`；可选 `cache_dir` 落盘每次迭代场数据 |
+| `calibrate_q_scale_to_inlet_peak(...)`（`SimuCoronary/calculators.py`） | 外环二分标定 `q_scale`；可选 `cache_dir` 落盘每次迭代场数据 |
 | `SimuCoronary/calibration_cache.py` | 缓存读写与事后绘图（`load` / `plot` / CLI），与主求解器分离 |
 | `_minmod(cd, Δ₋, Δ₊)` | MC（monotonized central）TVD 限制器：`minmod(中心差分, 2Δ₋, 2Δ₊)`；三者同号取绝对值最小并保号，否则 0 |
 | `_muscl_states(U, A0)` | 界面左右重构态（含面积下限钳位） |
 | `_flux_vector(A, Q, alpha)` | 物理通量 \(F=[Q,\ \alpha Q^2/A]^\mathsf{T}\) |
 | `_hll_flux(...)` | HLL 近似黎曼通量 |
 | `resample_axial_profile(...)`（`SimuCoronary/geometry.py`） | 沿程面积/侧支重采样到目标 `nx` |
-| `roi_process(roi_idx, ...)` | 按 ROI 下标裁剪面积与侧支 |
-| `demo()` / `example(...)` | 内置算例；`example` 会先调用 `calibrate_q_scale_to_inlet_peak` 再绘图/算 FFR |
+| `build_virtual_stent(...)`（`SimuCoronary/geometry.py`） | 按近/远端参考重构支架段面积（虚拟 FFR）；`NavierStokes1D.apply_virtual_stent()` 调用 |
+| `example(...)`（`Scripts/experiment.py`） | 内置算例；先 `calibrate_q_scale_to_inlet_peak` 再绘图/算 FFR；脚本层，不在包内 |
 
 **`NavierStokes1D` 内部方法速查**（便于定位与覆写）：
 
@@ -1308,20 +1312,21 @@ Q_{\mathrm{in}}(t)=Q\bigl(t;\,f_{\mathrm{cor}}\cdot q_{\mathrm{scale}}\bigr)
 
 **算法**（`calibrate_q_scale_to_inlet_peak`）：
 
-1. 每次用当前 `q_scale` 构造 `NavierStokes1D` 并完整 `run()`。
+1. 每次用当前 `q_scale` 构造 `NavierStokes1D` 并完整 `run()`；若 `virtual_stent=True`（默认），构造后先调 `apply_virtual_stent()`。
 2. 用 `NavierStokes1D.pressure_extrema_mmhg()` 取末段一个心动周期的 \(\max p(0,t)\)（即 `p_in_systolic`）。
-3. 目标开区间 \((p_{\mathrm{lo}},p_{\mathrm{hi}})\)（`example` 默认 \((90,105)\,\mathrm{mmHg}\)）：
+3. 目标开区间 \((p_{\mathrm{lo}},p_{\mathrm{hi}})\)（`Scripts/experiment.py` 默认 \((95,125)\,\mathrm{mmHg}\)）：
    - 峰值 \(\ge p_{\mathrm{hi}}\) → 流量过大，搜索上界 `hi ← q_scale`；
    - 峰值 \(\le p_{\mathrm{lo}}\) → 流量过小，搜索下界 `lo ← q_scale`；
    - 下一次取中点。
-4. 最多 `max_iters=5`。落入区间则 `converged=True`；否则返回峰值最接近目标窗的一次。
+4. 最多 `max_iters=10`。落入区间则 `converged=True`；否则返回峰值最接近目标窗的一次。
 
-默认搜索 \(q_{\mathrm{scale}}\in[0.05,2]\)。也可传入 `q_scale_min` / `q_scale_max`。首次猜测取参数里已有的 `q_scale`（默认 1）。假定入口峰值压随流量近似单调。
+默认搜索 \(q_{\mathrm{scale}}\in[0.05,3]\)。也可传入 `q_scale_min` / `q_scale_max`。首次猜测取参数里已有的 `q_scale`（默认 1）。假定入口峰值压随流量近似单调。
 
 **调用示例**：
 
 ```python
-from SimuCoronary.navier_stokes_1d import BloodFlowParameters, calibrate_q_scale_to_inlet_peak
+from SimuCoronary.calculators import calibrate_q_scale_to_inlet_peak
+from SimuCoronary.navier_stokes_1d import BloodFlowParameters
 
 par = BloodFlowParameters()  # coronary_flow_fraction 保持 0.03
 solver, cal = calibrate_q_scale_to_inlet_peak(
@@ -1351,7 +1356,7 @@ ffr = solver.ffr_ratio()
 | `peak_lo_mmhg` / `peak_hi_mmhg` | 目标窗 |
 | `history` | 每次迭代的 `q_scale`、`p_in_peak`、`q_mean`、`in_range` |
 
-**与 `example()` 的关系**：`example()` 在绘图与 `ffr_ratio()` 之前默认调用本外环。所得 FFR 对应该生理入口压下的流量缩放，不与未标定（`q_scale=1` 硬跑）算例直接比绝对值。
+**与 `Scripts/experiment.py` 的关系**：该脚本在绘图与 `ffr_ratio()` 之前默认调用本外环。所得 FFR 对应该生理入口压下的流量缩放，不与未标定（`q_scale=1` 硬跑）算例直接比绝对值。
 
 **代价**：最坏若干次完整时程，墙钟时间约为单次 `run` 的数倍。
 
@@ -1361,7 +1366,7 @@ ffr = solver.ffr_ratio()
 
 - 传入 `cache_dir=...` 时，每次迭代写入 `iter_XX.npz` 与 `summary.json`。
 - 事后分析：`python -m SimuCoronary.calibration_cache data/cache/q_scale_cal_...`，或 `from SimuCoronary.calibration_cache import load_calibration_cache, plot_calibration_iterations`。
-- `example()` 默认缓存到 `data/cache/q_scale_cal_<name>_nx*_T*/`。
+- `Scripts/experiment.py` 默认缓存到 `data/cache/q_scale_cal_<name>_nx*_T*/`（`use_virtual_stent=True` 时带 `_with_virtual_stent` 后缀）。
 
 ### 13.2 改为定压（压力驱动）入口
 
@@ -1443,7 +1448,7 @@ A：`coronary_flow_fraction` 是生理分流比；`q_scale` 是乘在该比例�
 A：会。乘法缩放同时改变流量均值与峰谷差，压力脉压差通常也随之变化。
 
 **Q：如何把入口压力峰值收到生理窗？**  
-A：调用 `calibrate_q_scale_to_inlet_peak(...)`（二分，最多 5 次 `run`）。`example()` 已默认接入。见 [§13.1](#131-用-q_scale-外环标定入口峰值压)。
+A：调用 `calibrate_q_scale_to_inlet_peak(...)`（二分，最多 `max_iters` 次 `run`，默认 10）。`Scripts/experiment.py` 已默认接入。见 [§13.1](#131-用-q_scale-外环标定入口峰值压)。
 
 **Q：如何改出口阻力/顺应性？**  
 A：设置 `outlet_r_distal_mmhg_s_per_ml`、`outlet_compliance_ml_per_mmhg` 等；与 `coronary_outlet` 中参数含义相同。当前默认 `Rd=25`。构造求解器时必定用 \(Q_{\mathrm{mean}}(R_d+R_p)\) 覆盖 `p_ref_mmhg`，发生在创建 Windkessel 之前，不能关闭。
@@ -1483,13 +1488,15 @@ A：**不能达到你认为的效果**。`p_ref` 只是 tube law 的零点，平
 FFR_1D/
 ├── SimuCoronary/              # 包：冠脉 1D 血流模块
 │   ├── __init__.py            # 常用 API 集中导出
-│   ├── navier_stokes_1d.py    # 本求解器 ★
+│   ├── navier_stokes_1d.py    # 本求解器 ★（纯库，无 __main__）
+│   ├── calculators.py         # 高级接口：q_scale 外环标定
 │   ├── calibration_cache.py   # q_scale 标定缓存读写与事后绘图
-│   ├── geometry.py            # 近远端参考与狭窄检测
+│   ├── geometry.py            # 近远端参考、狭窄检测、虚拟支架
 │   ├── branch.py              # Murray 侧支划分
 │   ├── coronary_constants.py  # 共享公开全局常量
 │   ├── coronary_inlet.py      # 入口 Q(t)
 │   └── coronary_outlet.py     # Windkessel 出口模型与离线压力
+├── Scripts/experiment.py      # 可直跑的算例入口
 ├── docs/navier_stokes_1d.md   # 本文档
 └── demo/                      # 早期原型（勿与包内求解器混用）
 ```

@@ -148,14 +148,16 @@ def smooth_axial_area(
       在 ``A[dist]`` 与 ``A[id2]`` 之间线性插值；``[id2, n-1]`` 常数填为 ``A[id2]``。
 
     最后对整段做 ``gaussian_filter1d(..., sigma=sigma_nodes, mode="nearest")``。
-    ---
-    Params:
+    Parameters
+    ----------
         areas: np.ndarray, 原始血管面积序列
         stenosis_segment: StenosisSegment, 一段检测到的狭窄
         only_smooth: bool, 是否只进行高斯平滑，而不进行插值
         sigma_nodes: float, 高斯平滑的标准差
         only_padding_max: bool, 是否只把近端``[0, prox]``常数填为 ``A[prox]``，``[dist, n-1]`` 常数填为 ``A[dist]``，而不进行插值，以尽量保留原始面积曲线
-    Returns:
+
+    Returns
+    -------
         np.ndarray: 平滑后的面积序列
     """
     from scipy.ndimage import gaussian_filter1d
@@ -167,12 +169,12 @@ def smooth_axial_area(
 
     prox = int(stenosis_segment.prox_ref_idx)
     dist = int(stenosis_segment.dist_ref_idx)
-    a_prox = float(a0[prox])
-    a_dist = float(a0[dist])
     if not (0 <= prox <= dist < n):
         raise ValueError(
             f"参考下标非法：prox={prox}, dist={dist}, n={n}"
         )
+    a_prox = float(a0[prox])
+    a_dist = float(a0[dist])
 
     out = a0.copy()
 
@@ -201,6 +203,57 @@ def smooth_axial_area(
                 x = np.arange(dist, id2 + 1, dtype=float)
                 out[dist : id2 + 1] = np.interp(x, [dist, id2], [a_dist, a_id2])
 
+    return gaussian_filter1d(out, sigma=float(sigma_nodes), mode="nearest")
+
+
+def build_virtual_stent(
+    areas: np.ndarray,
+    stenosis_segment: StenosisSegment,
+    *,
+    use_avg_as_ref: bool = False,
+    sigma_nodes: float = 2.0,
+):
+    """
+    根据狭窄检测结果，构建虚拟支架。
+    在狭窄近端参考段和远端参考段之间，填充虚拟支架。
+
+    Parameters
+    ----------
+        areas: np.ndarray, 原始血管面积序列
+        stenosis_segment: StenosisSegment, 一段检测到的狭窄
+        use_avg_as_ref: bool 是否将近端参考和远端参考的均值作为狭窄恢复后的管腔面积，默认为否，为否时，
+        采用锥形假设，即从近端到远端，采用线性插值方式填充狭窄恢复后的管腔面积。
+        sigma_nodes: float, 高斯平滑的标准差
+
+    Returns
+    -------
+        np.ndarray: 假设虚拟支架缓解管腔狭窄后的面积序列
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    a0 = np.asarray(areas, dtype=float).ravel()
+    n = int(a0.shape[0])
+    if n == 0:
+        return a0.copy()
+
+    prox = int(stenosis_segment.prox_ref_idx)
+    dist = int(stenosis_segment.dist_ref_idx)
+    if not (0 <= prox <= dist < n):
+        raise ValueError(
+            f"参考下标非法：prox={prox}, dist={dist}, n={n}"
+        )
+    a_prox = float(a0[prox])
+    a_dist = float(a0[dist])
+
+    out = a0.copy()
+    out[0 : prox] = a_prox
+    out[dist : ] = a_dist
+    if use_avg_as_ref:
+        a_ref = 0.5 * (a_prox + a_dist)
+        out[prox : dist] = a_ref
+    else:
+        a_refs = np.interp(np.arange(prox, dist), [prox, dist], [a_prox, a_dist])
+        out[prox : dist] = a_refs
     return gaussian_filter1d(out, sigma=float(sigma_nodes), mode="nearest")
 
 

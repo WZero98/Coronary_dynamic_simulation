@@ -3,9 +3,9 @@ SimuCoronary — 冠状动脉一维血流模拟包
 
 模块划分
 --------
-- ``navier_stokes_1d``   1D 求解器主体（``NavierStokes1D``、``BloodFlowParameters``、
-                         ``calibrate_q_scale_to_inlet_peak`` 等）
-- ``geometry``           近/远端参考选取、狭窄检测、沿程重采样
+- ``navier_stokes_1d``   1D 求解器主体（``NavierStokes1D``、``BloodFlowParameters`` 等）
+- ``calculators``        高级接口：外环 ``q_scale`` 标定（``calibrate_q_scale_to_inlet_peak``）
+- ``geometry``           近/远端参考选取、狭窄检测、虚拟支架、沿程重采样
 - ``branch``             Murray 侧支划分
 - ``coronary_inlet``     入口脉动流量波形（生理模板 + 傅里叶拟合）
 - ``coronary_outlet``    三元 RCR Windkessel 出口压力
@@ -60,9 +60,12 @@ _EXPORTS: dict[str, str] = {
     "coronary_outlet_pressure_stats": "coronary_outlet",
     "plot_coronary_outlet_pressure": "coronary_outlet",
     "windkessel3_outlet_pressure": "coronary_outlet",
+    # calculators
+    "calibrate_q_scale_to_inlet_peak": "calculators",
     # geometry
     "StenosisSegment": "geometry",
     "build_stenosis_segment": "geometry",
+    "build_virtual_stent": "geometry",
     "find_mla_index": "geometry",
     "resample_axial_profile": "geometry",
     "smooth_axial_area": "geometry",
@@ -71,7 +74,6 @@ _EXPORTS: dict[str, str] = {
     "NavierStokes1D": "navier_stokes_1d",
     "OutletWindkesselState": "navier_stokes_1d",
     "area_from_lumen_pressure_mmhg": "navier_stokes_1d",
-    "calibrate_q_scale_to_inlet_peak": "navier_stokes_1d",
     "integral_mean": "navier_stokes_1d",
     "lumen_pressure_mmhg": "navier_stokes_1d",
 }
@@ -118,9 +120,11 @@ if TYPE_CHECKING:  # 供 IDE / 类型检查器静态解析
         plot_coronary_outlet_pressure,
         windkessel3_outlet_pressure,
     )
+    from .calculators import calibrate_q_scale_to_inlet_peak
     from .geometry import (
         StenosisSegment,
         build_stenosis_segment,
+        build_virtual_stent,
         find_mla_index,
         resample_axial_profile,
         smooth_axial_area,
@@ -130,7 +134,6 @@ if TYPE_CHECKING:  # 供 IDE / 类型检查器静态解析
         NavierStokes1D,
         OutletWindkesselState,
         area_from_lumen_pressure_mmhg,
-        calibrate_q_scale_to_inlet_peak,
         integral_mean,
         lumen_pressure_mmhg,
     )

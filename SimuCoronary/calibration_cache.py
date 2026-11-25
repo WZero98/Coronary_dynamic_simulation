@@ -1,7 +1,7 @@
 """
 q_scale 标定迭代的缓存读写与事后绘图。
 
-与 ``navier_stokes_1d.calibrate_q_scale_to_inlet_peak(..., cache_dir=...)`` 配合：
+与 ``calculators.calibrate_q_scale_to_inlet_peak(..., cache_dir=...)`` 配合：
 标定过程写入 ``iter_XX.npz`` + ``summary.json``；本模块负责落盘、读回与出图。
 
 用法
@@ -15,6 +15,8 @@ q_scale 标定迭代的缓存读写与事后绘图。
     from SimuCoronary.calibration_cache import load_calibration_cache, plot_calibration_iterations
     cal = load_calibration_cache(r"data/cache/...")
     plot_calibration_iterations(cal)
+
+本模块被 ``calculators.calibrate_q_scale_to_inlet_peak`` 调用以落盘每次迭代。
 """
 
 from __future__ import annotations

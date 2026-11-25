@@ -64,13 +64,12 @@ navier_stokes_1d.py — 冠状动脉一维轴向血流模拟
 时间步长：CFL 自适应
 """
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
 
 from .branch import prepare_side_branches
-from .calibration_cache import iteration_snapshot, save_calibration_cache
 from .coronary_constants import (
     DEFAULT_PROXIMAL_FRACTION,
     MINIMUM_AREA_RATIO,
@@ -79,7 +78,7 @@ from .coronary_constants import (
     rho_for_mmhg_pressure_coupling,
 )
 from .coronary_inlet import coronary_inlet_flow
-from .geometry import build_stenosis_segment, smooth_axial_area, resample_axial_profile
+from .geometry import build_stenosis_segment, smooth_axial_area, build_virtual_stent
 
 
 # ---------------------------------------------------------------------------
@@ -1079,16 +1078,14 @@ class NavierStokes1D:
             self.history_time,
         )
 
-    def generate_virtual_stent(self):
+    def apply_virtual_stent(self):
         """
         基于初始化的血管面积，和识别到的狭窄，假设近端参考段和远端参考段之间的狭窄
         通过支架而缓解，重新生成的血管面积，即假设虚拟支架缓解了狭窄的情况后，再进行虚拟FFR的计算。
         使用时，先运行该接口，再运行run()即可。
         """
-        # TODO 
-        # placeholder
-
-        pass
+        areas_with_virtual_stent = build_virtual_stent(self.raw_area, self.lesions[0])
+        self.area_ref = areas_with_virtual_stent
 
 
     def pressure_extrema_mmhg(
@@ -1564,244 +1561,3 @@ class NavierStokes1D:
             fig.show(**show_kw)
         return fig
 
-
-def calibrate_q_scale_to_inlet_peak(
-    area_cm2: np.ndarray | list,
-    vessel_length_cm: float,
-    parameters: BloodFlowParameters | None = None,
-    *,
-    branch_frame_indices: Optional[Sequence[int]] = None,
-    branch_diameters_cm: Optional[Sequence[float]] = None,
-    apply_murray_scale: bool = True,
-    duration_s: float = 3.0,
-    record_interval_steps: int = 20,
-    peak_lo_mmhg: float = 95.0,
-    peak_hi_mmhg: float = 125.0,
-    q_scale_min: float = 0.05,
-    q_scale_max: float = 3.0,
-    max_iters: int = 10,
-    verbose: bool = True,
-    cache_dir: str | None = None,
-) -> tuple["NavierStokes1D", dict]:
-    """外环二分标定 ``q_scale``，使入口压力峰值落入 ``(peak_lo, peak_hi)``。
-
-    不改 ``coronary_flow_fraction``：生成入口时用 ``fraction * q_scale``。
-    假定定流量入口下峰值压随流量近似单调：峰值过高则减小 ``q_scale``，过低则增大。
-
-    若给定 ``cache_dir``，每次迭代写入 ``iter_XX.npz`` + ``summary.json``；
-    事后读图用 ``python -m SimuCoronary.calibration_cache <cache_dir>``。
-
-    Returns
-    -------
-    solver, report
-        ``report`` 含 ``q_scale``、``p_in_peak``、``converged``、``history`` 等。
-    """
-    if peak_hi_mmhg <= peak_lo_mmhg:
-        raise ValueError("peak_hi_mmhg 须大于 peak_lo_mmhg")
-    if q_scale_max <= q_scale_min:
-        raise ValueError("q_scale_max 须大于 q_scale_min")
-    if max_iters < 1:
-        raise ValueError("max_iters 至少为 1")
-
-    base = parameters if parameters is not None else BloodFlowParameters()
-    lo = float(q_scale_min)
-    hi = float(q_scale_max)
-    q = float(np.clip(base.q_scale, lo, hi))
-    target = 0.5 * (float(peak_lo_mmhg) + float(peak_hi_mmhg))
-    history: list[dict] = []
-    best_solver: NavierStokes1D | None = None
-    best_loss = float("inf")
-    best_rec: dict | None = None
-
-    if verbose:
-        print(
-            f"calibrate q_scale: target p(0) peak in ({peak_lo_mmhg:.1f}, "
-            f"{peak_hi_mmhg:.1f}) mmHg, search [{lo:.3f}, {hi:.3f}], "
-            f"max_iters={max_iters}"
-        )
-
-    def _finish(solver: NavierStokes1D, converged: bool) -> tuple[NavierStokes1D, dict]:
-        assert best_rec is not None
-        last = history[-1]
-        report = {
-            "converged": converged,
-            "q_scale": float(last["q_scale"] if converged else best_rec["q_scale"]),
-            "p_in_peak": float(last["p_in_peak"] if converged else best_rec["p_in_peak"]),
-            "q_mean": float(last["q_mean"] if converged else best_rec["q_mean"]),
-            "n_iters": len(history),
-            "peak_lo_mmhg": float(peak_lo_mmhg),
-            "peak_hi_mmhg": float(peak_hi_mmhg),
-            "history": history,
-        }
-        if cache_dir is not None:
-            path = save_calibration_cache(report, cache_dir)
-            if verbose:
-                print(f"  cached iterations → {path}")
-        return solver, report
-
-    for it in range(1, int(max_iters) + 1):
-        paras = replace(base, q_scale=q)
-        solver = NavierStokes1D(
-            area_cm2,
-            vessel_length_cm,
-            paras,
-            branch_frame_indices=branch_frame_indices,
-            branch_diameters_cm=branch_diameters_cm,
-            apply_murray_scale=apply_murray_scale,
-        )
-        solver.run(
-            duration_s=duration_s,
-            record_interval_steps=record_interval_steps,
-            verbose=True,
-        )
-        peak = float(solver.pressure_extrema_mmhg()["p_in_systolic"])
-        in_range = bool(peak_lo_mmhg < peak < peak_hi_mmhg)
-        # loss：距目标窗的偏差（越小越好）；窗内为 0，另加中心偏置作并列打破
-        if in_range:
-            loss = 0.0
-        elif peak >= peak_hi_mmhg:
-            loss = peak - peak_hi_mmhg
-        else:
-            loss = peak_lo_mmhg - peak
-        loss = float(loss) + 1e-3 * abs(peak - target)
-
-        snap = iteration_snapshot(solver, it, q, peak, in_range)
-        history.append(snap)
-        if verbose:
-            print(
-                f"  iter {it}/{max_iters}: q_scale={q:.4f}, "
-                f"p(0)_peak={peak:.2f} mmHg, Q_mean={snap['q_mean']:.3f} mL/s"
-                + ("  [OK]" if in_range else "")
-            )
-
-        if loss < best_loss:
-            best_loss = loss
-            best_solver = solver
-            best_rec = snap
-
-        if in_range:
-            return _finish(solver, True)
-
-        if peak >= peak_hi_mmhg:
-            hi = q
-        else:
-            lo = q
-        if abs(hi - lo) < 1e-9:
-            break
-        q = 0.5 * (lo + hi)
-
-    assert best_solver is not None and best_rec is not None
-    if verbose:
-        print(
-            f"  not converged in {max_iters} iters; "
-            f"best q_scale={float(best_rec['q_scale']):.4f}, "
-            f"p(0)_peak={float(best_rec['p_in_peak']):.2f} mmHg"
-        )
-    return _finish(best_solver, False)
-
-
-def example(
-    target_nx: int | None = 100,
-    frame_spacing_cm: float = 0.02,
-    duration_s: float = 3.0,
-    sigma_nodes: float = 4,
-    name: str = 'Null',
-):
-    """下游 joblib 数据示例；``target_nx`` 控制轴向降采样（None=不降采样）。
-
-    先用 ``calibrate_q_scale_to_inlet_peak`` 把入口峰值压收到目标窗，
-    再在该 ``q_scale`` 下绘图并返回 FFR。
-    """
-    import joblib
-    import os
-    np.random.seed(2034)
-    mm_per_pixel = (9.7 / 756)
-
-    dirname = f"./data/stenoses_data"
-    # 原始 npy：面积为 pixel²，直径为 pixel，读入后一律换成 cm / cm²
-    area_file = joblib.load(os.path.join(dirname, "areas.joblib"))
-    area = np.array(area_file)[::-1] * (mm_per_pixel**2) / 100.0  # mm² → cm²
-    nx = area.shape[0]
-    print(f"raw nx={nx}")
-
-    # 分支信息（与 area 同向：近端→远端）
-    branch_groups = joblib.load(os.path.join(dirname, "branches.joblib"))
-    branch_d = np.array(joblib.load(os.path.join(dirname, "branch_diameters.joblib")))
-    branch_d = branch_d[::-1] * mm_per_pixel / 10.0  # mm → cm
-    branch_idx = [nx - idxs[0] for idxs in branch_groups][::-1]
-
-    # 只选择目标区域
-    # roi_idx = list(range(10, 230))
-    # area_smooth, branch_idx, branch_d = roi_process(roi_idx, area_smooth, branch_idx, branch_d)
-
-    # 轴向重采样：降低 nx 以加速；物理长度保持 frame_spacing_cm * nx_raw
-    area, length, nx, branch_idx, branch_d = resample_axial_profile(
-        area,
-        target_nx=target_nx,
-        branch_frame_indices=branch_idx,
-        branch_diameters_cm=branch_d,
-        frame_spacing_cm=frame_spacing_cm,
-    )
-    print(nx, length, f"n_branch={len(branch_idx)}")
-
-    parameters = BloodFlowParameters()
-    cache_dir = os.path.join(
-        "data",
-        "cache",
-        f"q_scale_cal_{name}_nx{nx}_T{duration_s:.2f}",
-    )
-    solver, cal = calibrate_q_scale_to_inlet_peak(
-        area,
-        length,
-        parameters,
-        branch_frame_indices=branch_idx,
-        branch_diameters_cm=branch_d,
-        duration_s=duration_s,
-        record_interval_steps=30,
-        peak_lo_mmhg=95.0,
-        peak_hi_mmhg=125.0,
-        max_iters=10,
-        verbose=True,
-        cache_dir=cache_dir,
-    )
-    print(
-        f"calibrated: converged={cal['converged']}, "
-        f"q_scale={cal['q_scale']:.4f}, "
-        f"p(0)_peak={cal['p_in_peak']:.2f} mmHg, Q_mean={cal['q_mean']:.3f} mL/s"
-    )
-    print(f"cache_dir={cal.get('cache_dir', cache_dir)}")
-
-    html_path = os.path.join(
-        cal.get("cache_dir", cache_dir),
-        f"final_nx{nx}_qs{cal['q_scale']:.3f}.html",
-    )
-    solver.plot_results_1(
-        title=f"{name}_nx{nx}_qs{cal['q_scale']:.3f}",
-        show=False,
-        save_path=html_path,
-    )
-    print(f"saved final plotly: {html_path}")
-
-    assert solver.history_time is not None
-    assert solver.history_flow is not None
-    assert solver.history_pressure is not None
-
-    t_hist = solver.history_time
-    q_in = integral_mean(solver.history_flow[:, 0], t_hist)
-    q_out = integral_mean(solver.history_flow[:, -1], t_hist)
-    q_side = (
-        float(integral_mean(np.sum(solver.history_branch_flow, axis=1), t_hist))
-        if solver.history_branch_flow is not None and solver.history_branch_flow.size
-        else 0.0
-    )
-    print(f"Q_in={q_in:.3f}, Q_out={q_out:.3f}, Q_side_sum={q_side:.3f}")
-    print(f"mass check: Q_in ≈ Q_out+Q_side → {q_in:.3f} vs {q_out + q_side:.3f}")
-
-    ffr = solver.ffr_ratio()
-    return ffr
-
-
-if __name__ == "__main__":
-    # target_nx=100 降采样；改为 None 可跑原始分辨率对比准确率
-    ffr = example(target_nx=200, name="stenoses")
-    print(f"max ffr: {np.max(ffr)}\n min ffr: {np.min(ffr)}")
