@@ -10,6 +10,9 @@
 2. [环境与依赖](#2-环境与依赖)
 3. [物理模型与单位](#3-物理模型与单位)
 4. [数值方法](#4-数值方法)
+   - [4.1 空间离散](#41-空间有限体积--muscl--tvd--hll)
+   - [4.2 时间离散](#42-时间ssp-rk2)
+   - [4.3 CFL 条件](#43-cfl-条件)
 5. [边界条件](#5-边界条件)
 6. [快速开始](#6-快速开始)
 7. [输入数据：管腔面积剖面](#7-输入数据管腔面积剖面)
@@ -794,8 +797,17 @@ print("FFR ≈", solver.ffr_ratio())
 ```
 
 绘图接口**不在 `NavierStokes1D` 上**。求解器不绑定任何绘图库，`run()` 返回的
-`A/Q/p/t` 数组（以及 `solver.history_*`）可用任意库自行绘制。交互式可视化实现位于
-`Scripts/experiment.py`，用法见 `Scripts/README.md`。
+`A/Q/p/t` 数组（以及 `solver.history_*`）可用任意库自行绘制。
+
+包内 `SimuCoronary/utils.py` 提供了现成的五图交互版：
+
+```python
+from SimuCoronary.utils import plot_results
+
+plot_results(solver, show=False, save_path="out.html")
+```
+
+`plot_results()` 的版面、拖动条与实现要点见 `Scripts/README.md` §3。
 
 需要入口压落在生理窗时，用外环代替单次 `run`（见 §13.1）：
 
@@ -1479,7 +1491,9 @@ FFR_1D/
     ├── branch.py              # Murray 侧支划分
     ├── coronary_constants.py  # 共享公开全局常量
     ├── coronary_inlet.py      # 入口 Q(t)
-    └── coronary_outlet.py     # Windkessel 出口模型与离线压力
+    ├── coronary_outlet.py     # Windkessel 出口模型与离线压力
+    ├── simudata.py            # 参数化合成血管几何（模拟数据生成）
+    └── utils.py               # 通用可视化（Plotly 五图交互版）
 ```
 
 包外的 `Scripts/`（算例编排与交互式可视化）、`docs/`、`data/` 等目录

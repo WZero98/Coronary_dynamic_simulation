@@ -11,6 +11,8 @@ SimuCoronary — 冠状动脉一维血流模拟包
 - ``coronary_outlet``    三元 RCR Windkessel 出口压力
 - ``coronary_constants`` 模块间共享的公开常量
 - ``calibration_cache``  q_scale 标定缓存读写与事后绘图
+- ``simudata``           参数化合成血管几何（批量生成模拟数据）
+- ``utils``              通用可视化工具（Plotly 五图交互版）
 
 常用 API 集中导出，便于 ``from SimuCoronary import NavierStokes1D``。
 导出采用惰性导入（PEP 562）：访问属性时才加载对应子模块，因此
@@ -76,6 +78,11 @@ _EXPORTS: dict[str, str] = {
     "area_from_lumen_pressure_mmhg": "navier_stokes_1d",
     "integral_mean": "navier_stokes_1d",
     "lumen_pressure_mmhg": "navier_stokes_1d",
+    # simudata
+    "SimulatedVessel": "simudata",
+    "VesselGeometrySummary": "simudata",
+    # utils
+    "plot_results": "utils",
 }
 
 __all__ = list(_EXPORTS)
@@ -137,6 +144,8 @@ if TYPE_CHECKING:  # 供 IDE / 类型检查器静态解析
         integral_mean,
         lumen_pressure_mmhg,
     )
+    from .simudata import SimulatedVessel, VesselGeometrySummary
+    from .utils import plot_results
 
 
 def __getattr__(name: str) -> Any:

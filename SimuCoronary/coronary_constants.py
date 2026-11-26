@@ -16,7 +16,7 @@ DYNE_PER_CM2_TO_MMHG: Final[float] = 1.0 / MMHG_TO_DYNE_PER_CM2
 P_INLET_REF_MMHG: Final[float] = 75.0
 
 # 最小管腔面积占参考面积比例
-MINIMUM_AREA_RATIO = 0.8
+MINIMUM_AREA_RATIO = 0.2
 
 # 入口流量绝对下限 (mL/s)；q_scale 缩放后仍不得低于此值
 MINIMUM_INLET_FLOW_ML_S: Final[float] = 0.01

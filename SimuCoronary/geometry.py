@@ -20,7 +20,7 @@ class StenosisSegment:
 
 
 _END_EXCLUDE_FRAMES = 5  # MLA搜索时，首尾各排除帧数（固定）
-_MAX_REF_DISTANCE_CM = 5.0  # 参考帧距 MLA 上限 (cm)
+_MAX_REF_DISTANCE_CM = 10.0  # 参考帧距 MLA 上限 (cm)
 
 
 def find_mla_index(
