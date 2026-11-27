@@ -32,7 +32,7 @@ alwaysApply: false
 
 文档里出现**具体数值**时，必须以源码为准逐项核对。历史漂移高发点：
 
-- `MINIMUM_AREA_RATIO`（当前 0.8）
+- `MINIMUM_AREA_RATIO`（当前 0.05，纯数值保护，正常算例不触发；见 docs §5.3）
 - `p_ref_mmhg` 默认值（当前 75.0，= `P_INLET_REF_MMHG`）
 - `beta_mmhg_per_cm` 默认值（当前 3500.0）
 - `cardiac_output_l_per_min` 默认值（当前 8）

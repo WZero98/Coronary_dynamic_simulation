@@ -494,7 +494,7 @@ windkessel3_outlet_pressure(t, q, p_wk_init_mmhg=75.0)
 | 角色 | 实现 |
 |------|------|
 | 驱动流量 | \(Q_{\mathrm{drive}} = Q(L)\)，出口管腔 PDE 流量 |
-| 出口管腔压 | `P_lumen` 来自 ODE 状态，经 `area_from_lumen_pressure_mmhg` 得 \(A(L)\) |
+| 出口管腔压 | `P_lumen` 来自 ODE 状态，经 `area_from_lumen_pressure_mmhg` 得 \(A(L)\)（结果钳到该节点下限 \(A_{\min}=0.05\,A_0\)，纯数值保护，见 `navier_stokes_1d.md` §5.3） |
 | 管腔 \(Q(L)\) | **不由** \(P_{\mathrm{wk}}/R_d\) 强制，由 1D PDE 与入口传播决定 |
 | 离线参考 | 直接调用本模块 `windkessel3_outlet_pressure` |
 

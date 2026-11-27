@@ -120,7 +120,7 @@ def calibrate_q_scale_to_inlet_peak(
         solver.run(
             duration_s=duration_s,
             record_interval_steps=record_interval_steps,
-            verbose=True,
+            verbose=verbose,
         )
         peak = float(solver.pressure_extrema_mmhg()["p_in_systolic"])
         in_range = bool(peak_lo_mmhg < peak < peak_hi_mmhg)

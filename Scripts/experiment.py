@@ -38,7 +38,8 @@ from SimuCoronary.utils import (  # noqa: E402
     save_solver_bundle as _save_solver_bundle,
 )
 
-_SOLVER_CACHE_DIR = os.path.join(_REPO_ROOT, "data", "cache", "solver")
+SOLVER_CACHE_DIR = os.path.join(_REPO_ROOT, "results", "真实狭窄数据实例", "solver")
+CAL_CACHE_DIR = os.path.join(_REPO_ROOT, "results", "真实狭窄数据实例")
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ def solver_cache_path(
     """缓存文件路径。命名含决定结果的关键参数，避免误用别的算例。"""
     suffix = "_stent" if use_virtual_stent else ""
     return os.path.join(
-        _SOLVER_CACHE_DIR, f"{name}_nx{nx}_T{duration_s:.2f}{suffix}.pkl"
+        SOLVER_CACHE_DIR, f"{name}_nx{nx}_T{duration_s:.2f}{suffix}.pkl"
     )
 
 
@@ -180,9 +181,7 @@ def example(
     )
 
     html_path = os.path.join(
-        _REPO_ROOT,
-        "data",
-        "cache",
+        CAL_CACHE_DIR,
         f"q_scale_cal_{name}_nx{nx}_T{duration_s:.2f}"
         + ("_with_virtual_stent" if use_virtual_stent else ""),
         f"final_{name}_nx{nx}_qs{cal['q_scale']:.3f}.html",

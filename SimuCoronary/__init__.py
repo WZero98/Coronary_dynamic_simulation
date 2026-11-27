@@ -44,8 +44,8 @@ _EXPORTS: dict[str, str] = {
     # coronary_constants
     "DEFAULT_PROXIMAL_FRACTION": "coronary_constants",
     "DYNE_PER_CM2_TO_MMHG": "coronary_constants",
-    "MINIMUM_AREA_RATIO": "coronary_constants",
     "MINIMUM_INLET_FLOW_ML_S": "coronary_constants",
+    "MINIMUM_AREA_RATIO": "coronary_constants",
     "MMHG_TO_DYNE_PER_CM2": "coronary_constants",
     "P_INLET_REF_MMHG": "coronary_constants",
     "rho_for_mmhg_pressure_coupling": "coronary_constants",
@@ -78,6 +78,7 @@ _EXPORTS: dict[str, str] = {
     "area_from_lumen_pressure_mmhg": "navier_stokes_1d",
     "integral_mean": "navier_stokes_1d",
     "lumen_pressure_mmhg": "navier_stokes_1d",
+    "minimum_lumen_area": "navier_stokes_1d",
     # simudata
     "SimulatedVessel": "simudata",
     "VesselGeometrySummary": "simudata",
@@ -106,8 +107,8 @@ if TYPE_CHECKING:  # 供 IDE / 类型检查器静态解析
     from .coronary_constants import (
         DEFAULT_PROXIMAL_FRACTION,
         DYNE_PER_CM2_TO_MMHG,
-        MINIMUM_AREA_RATIO,
         MINIMUM_INLET_FLOW_ML_S,
+        MINIMUM_AREA_RATIO,
         MMHG_TO_DYNE_PER_CM2,
         P_INLET_REF_MMHG,
         rho_for_mmhg_pressure_coupling,
@@ -143,6 +144,7 @@ if TYPE_CHECKING:  # 供 IDE / 类型检查器静态解析
         area_from_lumen_pressure_mmhg,
         integral_mean,
         lumen_pressure_mmhg,
+        minimum_lumen_area,
     )
     from .simudata import SimulatedVessel, VesselGeometrySummary
     from .utils import plot_results

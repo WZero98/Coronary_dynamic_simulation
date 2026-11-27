@@ -521,10 +521,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print("对应 MLA：0.5×(prox+dist)×(1−rate)，"
           "等截面例（A=0.15）为："
           f"{[f'{0.15 * (1 - r):.4g}' for r in rates]} cm²")
-    print("仿真设置：L={} cm, n_cells={}, duration={}s, "
-          "AREA_SCALER=1.0, peak∈({}, {}) mmHg, virtual_stent=False".format(
-              base.LENGTH_CM, base.N_CELLS, base.DURATION_S,
-              base.PEAK_LO_MMHG, base.PEAK_HI_MMHG))
+    print("仿真设置：L={} cm, n_cells={} (生成 {} → 重采样), "
+          "duration={}s, AREA_SCALER=1.0, peak∈({}, {}) mmHg, "
+          "virtual_stent=False".format(
+              base.LENGTH_CM, base.RESAMPLE_NX, base.N_CELLS,
+              base.DURATION_S, base.PEAK_LO_MMHG, base.PEAK_HI_MMHG))
     print(f"并行：{args.workers} 进程")
     print()
 
@@ -600,8 +601,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         },
         "settings": {
             "length_cm": base.LENGTH_CM,
-            "n_cells": base.N_CELLS,
-            "dx_cm": base.LENGTH_CM / (base.N_CELLS - 1),
+            "n_cells_generated": base.N_CELLS,
+            "n_cells": base.RESAMPLE_NX,
+            "resample_nx": base.RESAMPLE_NX,
+            "dx_cm": base.LENGTH_CM / (base.RESAMPLE_NX - 1),
             "duration_s": base.DURATION_S,
             "record_interval_steps": base.RECORD_INTERVAL_STEPS,
             "peak_lo_mmhg": base.PEAK_LO_MMHG,

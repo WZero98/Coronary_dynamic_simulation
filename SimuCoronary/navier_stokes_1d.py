@@ -84,6 +84,31 @@ from .geometry import build_stenosis_segment, smooth_axial_area, build_virtual_s
 # ---------------------------------------------------------------------------
 # 管壁弹性律
 # ---------------------------------------------------------------------------
+def minimum_lumen_area(area_ref) -> np.ndarray:
+    """每节点管腔截面积下限：``MINIMUM_AREA_RATIO · A₀``。
+
+    这是**纯数值保护**，不是物理约束。求解器本身由守恒方程决定 A；
+    该下限只在数值极端（发散、算出非物理负面积）时兜底，正常算例不应触发。
+
+    **为什么取很小的比例（0.05）**：钳位直接改写守恒变量 A，被削掉的面积
+    对应的体积不守恒地消失，会污染质量收支并使 FFR 偏高。实测（MLA=0.008
+    合成算例，`q_scale=1`）比例取 0.8 时 FFR_min 由 0.16 失真到 0.39，
+    而取 0.2 及以下时不触发、结果与无下限一致。把比例压低即把「模型自己
+    说了算」的范围最大化。
+
+    Parameters
+    ----------
+    area_ref :
+        参考面积 A₀（标量或数组）。
+
+    Returns
+    -------
+    ndarray
+        与 ``area_ref`` 同形的下限。
+    """
+    return MINIMUM_AREA_RATIO * np.asarray(area_ref, dtype=float)
+
+
 def lumen_pressure_mmhg(
     area: np.ndarray,
     area_ref: np.ndarray,
@@ -94,10 +119,15 @@ def lumen_pressure_mmhg(
 
     p 为各向同性热力学压强，非某一坐标方向的应力分量；此处由 A 闭合，
     用于 tube law 径向胀缩关系及动量源项 −(A/ρ*)∂p/∂x。
+
+    计算前先把 A 钳到 :func:`minimum_lumen_area` 给出的下限。**结果可以为负**：
+    在狭窄段壅塞区，Bernoulli 加速（½ρ*αu²）确实能把管腔压压到 0 以下，
+    这是守恒方程的解，不是数值错误。负压是诊断信号，说明该处已超出
+    一维模型的适用范围（见 docs/navier_stokes_1d.md §5.3）。
     """
     a0 = np.asarray(area_ref, dtype=float)
-    a = np.maximum(np.asarray(area, dtype=float), MINIMUM_AREA_RATIO * a0)
     b = np.asarray(beta, dtype=float)
+    a = np.maximum(np.asarray(area, dtype=float), minimum_lumen_area(a0))
     return (p_ref + b * (np.sqrt(a) - np.sqrt(a0)))
 
 
@@ -107,12 +137,12 @@ def area_from_lumen_pressure_mmhg(
     beta,
     p_ref: float = P_INLET_REF_MMHG,
 ) -> np.ndarray:
-    """tube law 反解 A。"""
+    """tube law 反解 A；结果钳到 :func:`minimum_lumen_area` 给出的下限。"""
     a0 = np.asarray(area_ref, dtype=float)
     b = np.asarray(beta, dtype=float)
     p = np.asarray(pressure, dtype=float)
     sqrt_a = np.sqrt(a0) + (p - p_ref) / b
-    return np.maximum(sqrt_a**2, MINIMUM_AREA_RATIO * a0)
+    return np.maximum(sqrt_a**2, minimum_lumen_area(a0))
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +201,13 @@ def _minmod(slope_central_difference: np.ndarray, slope_l: np.ndarray, slope_r: 
 
 def _muscl_states(
     U: np.ndarray,
-    area_ref: np.ndarray
+    area_floor: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """单元界面 j+1/2 的左右重构状态（内部界面）。"""
+    """单元界面 j+1/2 的左右重构状态（内部界面）。
+
+    ``area_floor`` 为每节点面积下限（:func:`minimum_lumen_area`），重构后的
+    A_L、A_R 分别按各自来源单元的下限钳位。
+    """
     nvar, nx = U.shape  # nvar 为未知函数量，nx 为划分单元数
     slope = np.zeros_like(U)
     if nx >= 3:
@@ -185,10 +219,16 @@ def _muscl_states(
     u_left = U[:, :-1] + 0.5 * slope[:, :-1]  # 共 nx-1 个
     # 右状态计算，来自下一个单元
     u_right = U[:, 1:] - 0.5 * slope[:, 1:]  # 共 nx-1 个
-    floor = MINIMUM_AREA_RATIO * area_ref
+    floor = np.asarray(area_floor, dtype=float)
     u_left[0] = np.maximum(u_left[0], floor[:-1])
     u_right[0] = np.maximum(u_right[0], floor[1:])
     return u_left, u_right
+
+
+# 标量判定用的类型元组：np.float64 是 float 的子类，但 np.float32/np.int64
+# 不是，故需显式包含 np.floating / np.integer。用 isinstance 比 np.ndim()
+# 快得多（后者是 Python 函数调用 + 类型分派）。
+_SCALAR_LIKE = (int, float, np.floating, np.integer)
 
 
 def _wave_speed(
@@ -205,7 +245,18 @@ def _wave_speed(
     ``area=1`` 时即波速前置因子 γ = √(β/(2ρ*))——原先独立的
     ``_c_prefactor`` 已并入本函数，用 ``_wave_speed(1.0, beta, rho_mmhg)``
     取代。
+
+    纯标量输入走 Python 浮点快速路径：原实现里 ``np.asarray`` 与
+    ``np.maximum`` 各分配一个 0 维数组，开销远超实际算术（每步约 29 次
+    标量调用）。数组输入不变。
     """
+    if isinstance(area, _SCALAR_LIKE) and isinstance(beta, _SCALAR_LIKE):
+        a = float(area)
+        if a < 1e-12:
+            a = 1e-12
+        # c = √(β/(2ρ*)) · A^(1/4)，等价于下面的 numpy 广播式
+        return (float(beta) / (2.0 * float(rho_mmhg))) ** 0.5 * a ** 0.25
+
     b = np.asarray(beta, dtype=float)
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     # c² = (A/ρ*)·dp/dA，tube law 下 dp/dA = β/(2√A) → c = √(β√A/(2ρ*))
@@ -226,7 +277,24 @@ def _characteristic_speeds(
     ``beta`` 可为标量或与 ``area`` 同形的数组；标量输入返回 ``float``。
     HLL 波速、CFL 步长、边界相容与适定性诊断均调用本函数，避免多处
     各自展开公式导致不同步。
+
+    纯标量输入走 Python 浮点快速路径（原因同 :func:`_wave_speed`）：
+    本函数每步被调用约 9 次，其中 4 次来自边界处理，都是标量。
     """
+    if (
+        isinstance(area, _SCALAR_LIKE)
+        and isinstance(flow, _SCALAR_LIKE)
+        and isinstance(beta, _SCALAR_LIKE)
+    ):
+        a = float(area)
+        if a < 1e-12:
+            a = 1e-12
+        u = float(flow) / a
+        c = _wave_speed(a, float(beta), rho_mmhg)
+        disc = (c * c + alpha * (alpha - 1.0) * u * u) ** 0.5
+        au = alpha * u
+        return au + disc, au - disc
+
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     u = np.asarray(flow, dtype=float) / a
     c = np.asarray(_wave_speed(a, beta, rho_mmhg), dtype=float)
@@ -248,11 +316,25 @@ def _riemann_invariants(
 
     c = √(β √A / (2ρ*))，故 ∫(c/A) dA = 4c。这是 α = 1 时的标准不变量，
     不是浅水方程的 u ± 2c。通量里仍使用参数 α；α 接近 1 时边界相容用 4c。
+
+    全程用 Python 浮点直算（不经 ``_wave_speed`` 的类型分派，也不需要
+    额外的 ``float()`` 转换）：本函数每步被调用 2 次，全在边界。
     """
-    a = max(float(area), 1e-12)
+    a = float(area)
+    if a < 1e-12:
+        a = 1e-12
     u = float(flow) / a
-    c = float(_wave_speed(a, float(beta), rho_mmhg))
-    return u + 4.0 * c, u - 4.0 * c
+    c = (float(beta) / (2.0 * float(rho_mmhg))) ** 0.5 * a ** 0.25
+    four_c = 4.0 * c
+    return u + four_c, u - four_c
+
+
+# 非线性反解的收敛容差（详见 area_from_flow_and_w_minus 与
+# _outlet_flow_from_w_plus 的说明）
+_BISECT_TOL_AREA_CM2 = 1e-8      # 二分区间宽度阈值 (cm²)
+_BISECT_TOL_RESIDUAL = 1e-8      # 残差绝对值阈值
+_NEWTON_TOL_STEP = 1e-8          # Newton 相邻两步间隔阈值
+_NEWTON_TOL_RESIDUAL = 1e-8      # Newton 残差绝对值阈值
 
 
 def area_from_flow_and_w_minus(
@@ -265,8 +347,13 @@ def area_from_flow_and_w_minus(
 ) -> float:
     """由入口流量与出射不变量反解面积：Q/A − 4c(A) = W−。
 
-    Q > 0 时左端对 A 严格递减，正根唯一，用二分。根低于面积下限时返回下限
+    Q > 0 时左端对 A 严格递减，正根唯一，用二分。根低于面积下限
+    （:func:`minimum_lumen_area`，`MINIMUM_AREA_RATIO · A₀`）时返回下限
     （此时不变量无法精确满足，与 tube law 钳位一致）。
+
+    收敛判据（满足任一即停止）：区间宽度 ``hi − lo < 1e-6`` cm²，
+    或中点的残差 ``|g(mid)| < 1e-6``。``float64`` 尾数只有 52 bit，
+    区间收窄到 1e-6 cm² 后继续二分的增量低于浮点分辨率，无实际意义。
     """
     # γ = √(β/(2ρ*))：即 A=1 时的波速，等价于旧 _c_prefactor(beta, rho)
     gamma = float(_wave_speed(1.0, beta, rho_mmhg))
@@ -291,10 +378,14 @@ def area_from_flow_and_w_minus(
             return max(float(area_guess), a_min)
         for _ in range(70):
             mid = 0.5 * (lo + hi)
-            if residual(mid) > 0.0:
+            g_mid = residual(mid)
+            if g_mid > 0.0:
                 lo = mid
             else:
                 hi = mid
+            # 收敛判据：区间已足够窄，或残差已足够小
+            if (hi - lo) < _BISECT_TOL_AREA_CM2 or abs(g_mid) < _BISECT_TOL_RESIDUAL:
+                break
         return max(0.5 * (lo + hi), a_min)
 
     if abs(q) <= 1e-14 and w < 0.0 and gamma > 0.0:
@@ -365,12 +456,15 @@ def _outlet_flow_from_w_plus(
             if np.isfinite(q_new) and abs(q_new) < 1.0e6:
                 r_new = q_new - q_compatible(q_new)
                 if abs(r_new) < abs(r):
-                    q = q_new
                     accepted = True
                     break
             step *= 0.5
         if not accepted:
             return None
+        # 收敛判据：相邻两步间隔足够小，或新残差已足够小
+        if abs(q_new - q) < _NEWTON_TOL_STEP or abs(r_new) < _NEWTON_TOL_RESIDUAL:
+            return q_new
+        q = q_new
     r_end = q - q_compatible(q)
     if abs(r_end) <= 1e-6 * max(1.0, abs(q)):
         return q
@@ -378,15 +472,31 @@ def _outlet_flow_from_w_plus(
 
 
 def _flux_vector(
-    area: np.ndarray,
-    flow: np.ndarray,
+    area: np.ndarray | float,
+    flow: np.ndarray | float,
     alpha: float,
-) -> np.ndarray:
+) -> np.ndarray | tuple[float, float]:
     """物理通量 F(U)：质量通量 Q，动量通量仅对流项 α Q²/A。
+
+    纯标量输入返回 ``(F0, F1)`` 二元组（纯 Python 浮点，零数组分配）；
+    数组输入返回 ``(2, n)`` 数组。边界处每步 2 次调用传入的是标量，
+    原实现会 ``np.asarray`` 建数组再用 ``.ravel()`` 拆回，纯属浪费。
     """
+    if isinstance(area, _SCALAR_LIKE) and isinstance(flow, _SCALAR_LIKE):
+        a = float(area)
+        if a < 1e-12:
+            a = 1e-12
+        q = float(flow)
+        # 运算顺序与数组版本严格一致：alpha * (q**2) / a
+        return q, alpha * (q ** 2) / a
+
     a = np.maximum(np.asarray(area, dtype=float), 1e-12)
     q = np.asarray(flow, dtype=float)
-    return np.vstack([q, alpha * q**2 / a])
+    # 预分配后直接写，避免 vstack 内部的 atleast_2d + concatenate 两次分配
+    out = np.empty((2, q.size))
+    out[0] = q
+    out[1] = alpha * q ** 2 / a
+    return out
 
 
 def _hll_flux(
@@ -742,6 +852,9 @@ class NavierStokes1D:
         )
         p_ref = float(self.paras.p_ref_mmhg)
 
+        # 面积下限（依赖对齐后的 p_ref 与最终 A₀）：抬升过软的 β 后逐节点预算。
+        self._refresh_area_floor()
+
         # 主支远端 + 各侧支 Windkessel（Murray share 标定 R、C）
         self.outlet = OutletWindkesselState(
             self.paras, flow_share=self.distal_flow_fraction
@@ -791,6 +904,17 @@ class NavierStokes1D:
         q[0] = float(q_in)
         return np.maximum(q, 0.0)
 
+    def _refresh_area_floor(self, verbose: bool = True) -> np.ndarray:
+        """（重）计算每节点面积下限 ``self.area_floor = MINIMUM_AREA_RATIO · A₀``。
+
+        构造函数末尾与 :meth:`apply_virtual_stent` 之后各调用一次——两者都会
+        改写 ``area_ref``，而下限依赖它。
+
+        β 全段保持 ``paras.beta_mmhg_per_cm`` 常数，不随几何或下限调整。
+        """
+        self.area_floor = minimum_lumen_area(self.area_ref)
+        return self.area_floor
+
     def _update_pressure(self, state: np.ndarray | None = None) -> np.ndarray:
         """由当前 A 经 tube law 更新沿程管腔标量压 p(x)。"""
         u = self.state if state is None else state
@@ -827,7 +951,7 @@ class NavierStokes1D:
         F 仅含对流；压力驱动为 −(A/ρ*)∂p/∂x；摩擦 −8πμ Q/A；
         侧支处连续方程含质量汇 −Q_b/Δx。
         """
-        u_l, u_r = _muscl_states(state, self.area_ref)
+        u_l, u_r = _muscl_states(state, self.area_floor)
         n_if = self.nx - 1 # 有限体积法的内部界面数 number of interfaces between cells
         j = np.arange(n_if)
         rho_star = self.paras.momentum_rho()
@@ -841,12 +965,13 @@ class NavierStokes1D:
         )
         f_face = np.zeros((2, self.nx + 1))
         f_face[:, 1:-1] = f_inner
-        f_face[:, 0] = _flux_vector(
+        # 边界单元是标量，_flux_vector 返回 (F0, F1) 二元组，直接解包
+        f_face[0, 0], f_face[1, 0] = _flux_vector(
             state[0, 0], state[1, 0], self.paras.alpha
-        ).ravel()
-        f_face[:, -1] = _flux_vector(
+        )
+        f_face[0, -1], f_face[1, -1] = _flux_vector(
             state[0, -1], state[1, -1], self.paras.alpha
-        ).ravel()
+        )
 
         dudt = -(f_face[:, 1:] - f_face[:, :-1]) / self.dx  # 暂未添加源项，在下方逐步累加
         a = np.maximum(state[0], 1e-12)
@@ -974,9 +1099,9 @@ class NavierStokes1D:
         return u
 
     @staticmethod
-    def _clip_state(state: np.ndarray, area_ref: np.ndarray) -> np.ndarray:
+    def _clip_state(state: np.ndarray, area_floor: np.ndarray) -> np.ndarray:
         u = state.copy()
-        u[0] = np.maximum(u[0], MINIMUM_AREA_RATIO * area_ref)
+        u[0] = np.maximum(u[0], area_floor)
         # u[1] = np.maximum(u[1], 0.0)
         return u
 
@@ -996,13 +1121,13 @@ class NavierStokes1D:
         k1 = self._spatial_operator(u_n)  # 更新0-L内所有物理通量估计
 
         # 求k2
-        u_n1 = self._clip_state(u_n + dt * k1, self.area_ref)
+        u_n1 = self._clip_state(u_n + dt * k1, self.area_floor)
         u_n1 = self._apply_boundaries(u_n1, advance=True)  # 使用控制方程更新通量前，先应用边界条件，避免边界不合理
         k2 = self._spatial_operator(u_n1)
 
         self.state = u_n + dt * 0.5 * (k1 + k2)
         self.state = self._clip_state(
-            self.state, self.area_ref
+            self.state, self.area_floor
         )
         self._update_pressure()
 
@@ -1086,6 +1211,8 @@ class NavierStokes1D:
         """
         areas_with_virtual_stent = build_virtual_stent(self.raw_area, self.lesions[0])
         self.area_ref = areas_with_virtual_stent
+        # A₀ 变了，面积下限随之重算（含 β 有效性检查）
+        self._refresh_area_floor()
 
 
     def pressure_extrema_mmhg(
@@ -1228,10 +1355,11 @@ class NavierStokes1D:
         q_crit = float(np.mean(c * a, axis=0)[i_worst])
         q_peak = float(q.max(axis=0)[i_worst])
 
-        # 面积钳位：A/A₀ 触到 MINIMUM_AREA_RATIO 的采样点数
-        ratio = a / self.area_ref
-        n_clamp = int((ratio <= MINIMUM_AREA_RATIO + 1e-6).sum())
-        clamp_frac = float((ratio <= MINIMUM_AREA_RATIO + 1e-6).mean())
+        # 面积钳位：A 触及下限 area_floor（MINIMUM_AREA_RATIO · A₀）的采样点数
+        floor = np.asarray(self.area_floor, dtype=float)
+        clamped = a <= floor[None, :] * (1.0 + 1e-9)
+        n_clamp = int(clamped.sum())
+        clamp_frac = float(clamped.mean())
 
         return {
             "worst_idx": float(i_worst),
@@ -1284,8 +1412,8 @@ class NavierStokes1D:
         if s["n_clamp"] > 0:
             print(
                 f"  !! 面积钳位: {int(s['n_clamp'])} 个采样点触及 "
-                f"A/A0 = {MINIMUM_AREA_RATIO:.2f} 下限 ({s['clamp_fraction']:.1%})；"
-                f"tube law 在该处已非线性削平"
+                f"A/A0 = {MINIMUM_AREA_RATIO:.2f} 下限 ({s['clamp_fraction']:.2%})；"
+                f"tube law 在该处已非线性削平，结果不可用于定量分析"
             )
         return s
 

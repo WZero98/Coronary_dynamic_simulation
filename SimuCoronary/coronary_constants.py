@@ -15,8 +15,12 @@ DYNE_PER_CM2_TO_MMHG: Final[float] = 1.0 / MMHG_TO_DYNE_PER_CM2
 # 入口/出口 tube law 阻力标定用的参考管腔压 (mmHg)
 P_INLET_REF_MMHG: Final[float] = 75.0
 
-# 最小管腔面积占参考面积比例
-MINIMUM_AREA_RATIO = 0.2
+# 最小管腔面积占参考面积比例（数值下限，非物理约束）
+# 只在数值极端（发散、负面积）时兜底，正常算例不应触发。
+# 取 0.05 而非更大值的理由：比例式下限会直接改写守恒变量 A，
+# 一旦触发即破坏质量守恒并使 FFR 偏高（实测 0.8·A₀ 会使 FFR_min 由 0.16 失真到 0.39）。
+# 详见 docs/navier_stokes_1d.md §5.3。
+MINIMUM_AREA_RATIO: Final[float] = 0.05
 
 # 入口流量绝对下限 (mL/s)；q_scale 缩放后仍不得低于此值
 MINIMUM_INLET_FLOW_ML_S: Final[float] = 0.01

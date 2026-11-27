@@ -274,7 +274,7 @@ c(A) = \sqrt{\frac{\beta\sqrt{A}}{2\rho^*}},
    - \(U_L = U_j + \tfrac{1}{2}\sigma_j\)
    - \(U_R = U_{j+1} - \tfrac{1}{2}\sigma_{j+1}\)
    - 首尾单元（\(j=0\)、\(j=n_x-1\)）斜率置 0，退化为分段常数重构；边界界面不用重构态，而用 §5.1–5.2 的特征相容条件。
-3. 重构后的 \(A\) 不低于 \(0.8\,A_0\)（`MINIMUM_AREA_RATIO`，防止非物理负面积）。
+3. 重构后的 \(A\) 不低于 \(0.05\,A_0\)（`MINIMUM_AREA_RATIO`，纯数值保护，正常算例不触发；见 §5.3）。
 4. 内部界面用 **HLL** 近似黎曼解得到数值通量 \(\hat{F}_{j+1/2}\)；边界界面用物理通量 \(F(U_b)\)。\(U_b\) 由 §5.1–5.2 的特征相容条件给定，因此这条边界通量与出射 Riemann 不变量一致，而不是零梯度外推状态上的通量。
 
    HLL 波速取界面左右两侧的**真实特征速度**（`_characteristic_speeds`，含动量修正 \(\alpha\)）：
@@ -450,7 +450,7 @@ c=\sqrt{\frac{\beta\sqrt A}{2\rho^*}},\qquad
 \frac{Q_{\mathrm{in}}}{A(0)}-4c\bigl(A(0)\bigr)=W_-.
 \]
 
-\(Q_{\mathrm{in}}>0\) 时左端对 \(A\) 严格递减，正根唯一（`area_from_flow_and_w_minus`，二分）。然后
+\(Q_{\mathrm{in}}>0\) 时左端对 \(A\) 严格递减，正根唯一（`area_from_flow_and_w_minus`，二分）。二分在**区间宽度 \(< 10^{-6}\,\mathrm{cm^2}\)** 或**残差绝对值 \(< 10^{-6}\)** 时提前停止——`float64` 尾数仅 52 bit，继续收窄已低于浮点分辨率。然后
 
 ```text
 U[1, 0] = Q_in(t)          # 入射信息：定流量
@@ -562,16 +562,62 @@ RK 节拍与出口相同：子步 `apply_substep_from_pressure`（冻结 \(P_{\m
 
 ### 5.3 物理下限
 
-面积下限统一由常量 `MINIMUM_AREA_RATIO = 0.8`（`SimuCoronary/coronary_constants.py`）控制，在**三处**同时生效：
+面积下限是**纯数值保护**，不是物理约束：
+
+\[
+A \ge A_{\min}(x)=\texttt{MINIMUM\_AREA\_RATIO}\cdot A_0(x),
+\qquad \texttt{MINIMUM\_AREA\_RATIO}=0.05
+\]
+
+（`minimum_lumen_area`，`SimuCoronary/navier_stokes_1d.py`）。它在**三处**同时生效：
 
 | 位置 | 函数 | 行为 |
 |------|------|------|
-| MUSCL 重构 | `_muscl_states` | 左右重构态 \(A_L,A_R \ge 0.8\,A_0\) |
-| 状态钳位 | `_clip_state` | 每步末 \(A \ge 0.8\,A_0\) |
+| MUSCL 重构 | `_muscl_states` | 左右重构态按各自来源单元的下限钳位 |
+| 状态钳位 | `_clip_state` | 每步末 \(A \ge A_{\min}\) |
 | tube law 正/反解 | `lumen_pressure_mmhg` / `area_from_lumen_pressure_mmhg` | 内部先钳位再加压 |
 
-> **注意**：该下限是**数值保护**，不是物理约束。一旦求解过程中 \(A\) 大范围触及 \(0.8\,A_0\)，tube law 已被非线性削平，压力场不再可信。请用
-> `solver.wellposedness_diagnostics()` 的 `n_clamp` / `clamp_fraction` 检查（见 §9.5）。
+`NavierStokes1D.area_floor` 缓存逐节点的 \(A_{\min}\)，由 `_refresh_area_floor()` 在构造末尾与 `apply_virtual_stent()` 之后重算（两者都改写 `area_ref`）。\(\beta\) 全段保持 `paras.beta_mmhg_per_cm` 常数，**不随几何或下限调整**。
+
+> **设计取向：让守恒方程说了算。** 下限只负责在数值发散时兜住「非物理负面积」，比例取得很小（0.05），使正常算例根本不触发。实测（`MLA=0.008` 合成算例、`q_scale=1`）在 0.05 下钳位 0%、结果与无下限逐位一致。
+>
+> **为什么必须取小值**：钳位直接改写守恒变量 \(A\)，被削掉的面积对应体积不守恒地消失。实测同一算例：
+>
+> | 比例 | 钳位占比 | `FFR_min` | `mass_err` |
+> |------|---------|-----------|------------|
+> | 0.8 | 1.39% | **0.3913**（失真） | −0.4062 |
+> | 0.2 及以下 | 0% | 0.1611 | −0.0624 |
+>
+> 即比例越紧，钳位越频繁，FFR 越偏高（把狭窄算轻），质量残差越差。早期版本用过 0.8，属于把「无解」包装成「有解」。
+
+#### 5.3.1 负压是合法结果，不是错误
+
+**管腔压可以低于 0，求解器不会也不应阻止它。** 沿程动量方程（§3.1）在定常、无侧支时给出
+
+\[
+p_{\text{throat}}\approx p_{\text{in}}-\tfrac12\rho^*\alpha u_{\text{throat}}^2,
+\]
+
+故 \(u_{\text{throat}}\) 足够大时 \(p<0\) 是守恒方程的真解。而喉部速度受壅塞限制，饱和在 \(c\) 附近（\(u/c\approx1\)），于是该模型能产生的**最大 Bernoulli 压降**为
+
+\[
+\Delta p_{\max}=\tfrac12\rho^*\alpha c^2=\frac{\alpha\beta\sqrt{A_{\text{throat}}}}{4}.
+\]
+
+由此得统一判据（实测 \(\Pi\gtrsim0.8\) 即出现负压）：
+
+\[
+\Pi=\frac{\Delta p_{\max}}{p_{\mathrm{ref}}}
+=\frac{\alpha\rho^*\beta\sqrt{A_{\text{throat}}}}{4\,p_{\mathrm{ref}}}.
+\]
+
+要点：
+
+- \(\Pi \propto \sqrt{A}\) 与 \(\beta\)，**与入口流量无直接关系**（流量只影响能否达到饱和速度；\(Q\) 与 \(A\) 在判据中同阶，故「流量翻倍」≈「喉部面积减半」）。
+- **\(\beta\) 的影响非单调**：\(\beta\) 太小则 \(c\) 小、压降小；\(\beta\) 太大则 \(u/c\ll1\)、压降也小。钳位发生在中间区（实测 \(\beta\approx3000\text{–}8000\)，默认 3500 正在其中）。
+- 定流量入口下唯一能单独消除负压的参数是 \(p_{\mathrm{ref}}\)（即出口阻力，构造时对齐为 \(Q_{\mathrm{mean}}(R_d+R_p)\)）。
+
+负压应视为**诊断信号**：它说明该处已超出一维模型的适用范围（局部壅塞、三维修正、塌陷），需用 §9.5 的 `n_choked` / `λ₋` 判定，而不是靠抬高面积下限掩盖。
 
 ### 5.4 边界变量 vs 内部自由度（示意图）
 
@@ -1040,20 +1086,21 @@ NavierStokes1D(
 
 | 函数 | 说明 |
 |------|------|
-| `lumen_pressure_mmhg(A, A0, beta, p_ref)` | tube law：由 \(A\) 算管腔标量压 |
-| `area_from_lumen_pressure_mmhg(p, A0, beta, p_ref)` | tube law 反解 \(A\) |
+| `minimum_lumen_area(A0)` | 逐节点面积下限 \(A_{\min}=0.05\,A_0\)（纯数值保护，§5.3） |
+| `lumen_pressure_mmhg(A, A0, beta, p_ref)` | tube law：由 \(A\) 算管腔标量压（先钳到 \(A_{\min}\)；结果可为负，见 §5.3.1） |
+| `area_from_lumen_pressure_mmhg(p, A0, beta, p_ref)` | tube law 反解 \(A\)（结果钳到 \(A_{\min}\)） |
 | `integral_mean(y, x)` | 梯形法积分均值 \(\int y\,\mathrm{d}x / \int \mathrm{d}x\)，用于 FFR 的周期均值 |
-| `_wave_speed(A, beta, rho*)` | 弹性波速 \(c=\sqrt{\beta\sqrt A/(2\rho^*)}\)（不含 \(\alpha\)）；`A`、`beta` 可为标量或数组。\(A=1\) 时即波速前置因子 \(\gamma=\sqrt{\beta/(2\rho^*)}\)（原独立的 `_c_prefactor` 已并入本函数） |
-| `_characteristic_speeds(A, Q, beta, rho*, alpha)` | 特征速度 \(\lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}\)；**唯一实现**，HLL 波速 / CFL / 边界 / 适定性诊断共用。`A`、`beta` 可为标量或数组，标量输入返回 `float` |
-| `_riemann_invariants(A, Q, beta, rho*)` | \(W_\pm=u\pm 4c\)（tube law，不是浅水的 \(u\pm 2c\)） |
-| `area_from_flow_and_w_minus(Q, W−, ...)` | 入口：由定流量与出射不变量反解 \(A\) |
-| `_outlet_flow_from_w_plus(W+, ...)` | 出口：由出射不变量与 RCR 压力联立反解 \(Q\)；失败返回 `None` |
+| `_wave_speed(A, beta, rho*)` | 弹性波速 \(c=\sqrt{\beta\sqrt A/(2\rho^*)}\)（不含 \(\alpha\)）；`A`、`beta` 可为标量或数组。\(A=1\) 时即波速前置因子 \(\gamma=\sqrt{\beta/(2\rho^*)}\)（原独立的 `_c_prefactor` 已并入本函数）。**纯标量输入走 Python 浮点快速路径**（绕过 `np.asarray`/`np.maximum` 的 0 维数组分配），数组输入不变；两者数值逐位一致 |
+| `_characteristic_speeds(A, Q, beta, rho*, alpha)` | 特征速度 \(\lambda_\pm=\alpha u\pm\sqrt{c^2+\alpha(\alpha-1)u^2}\)；**唯一实现**，HLL 波速 / CFL / 边界 / 适定性诊断共用。`A`、`beta` 可为标量或数组，标量输入返回 `float`，并走与 `_wave_speed` 相同的标量快速路径 |
+| `_riemann_invariants(A, Q, beta, rho*)` | \(W_\pm=u\pm 4c\)（tube law，不是浅水的 \(u\pm 2c\)）。纯标量参数，全程 Python 浮点直算，不经 numpy 数组 |
+| `area_from_flow_and_w_minus(Q, W−, ...)` | 入口：由定流量与出射不变量反解 \(A\)（二分，收敛判据见 §5.1）；根低于 \(A_{\min}\) 时返回 \(A_{\min}\) |
+| `_outlet_flow_from_w_plus(W+, ...)` | 出口：由出射不变量与 RCR 压力联立反解 \(Q\)（牛顿，相邻步距或残差 \(<10^{-6}\) 即收敛）；失败返回 `None` |
 | `run_uniform_tube_mass_check(...)` | 等截面直管、无侧支的质量守恒检查（方向 A） |
 | `calibrate_q_scale_to_inlet_peak(...)`（`SimuCoronary/calculators.py`） | 外环二分标定 `q_scale`；可选 `cache_dir` 落盘每次迭代场数据 |
 | `SimuCoronary/calibration_cache.py` | 缓存读写与事后绘图（`load` / `plot` / CLI），与主求解器分离 |
 | `_minmod(cd, Δ₋, Δ₊)` | MC（monotonized central）TVD 限制器：`minmod(中心差分, 2Δ₋, 2Δ₊)`；三者同号取绝对值最小并保号，否则 0 |
-| `_muscl_states(U, A0)` | 界面左右重构态（含面积下限钳位） |
-| `_flux_vector(A, Q, alpha)` | 物理通量 \(F=[Q,\ \alpha Q^2/A]^\mathsf{T}\) |
+| `_muscl_states(U, area_floor)` | 界面左右重构态（含面积下限钳位） |
+| `_flux_vector(A, Q, alpha)` | 物理通量 \(F=[Q,\ \alpha Q^2/A]^\mathsf{T}\)。纯标量输入返回 `(F0, F1)` 二元组（零数组分配），数组输入返回 `(2, n)`；两者运算顺序一致，数值逐位相同 |
 | `_hll_flux(...)` | HLL 近似黎曼通量 |
 | `resample_axial_profile(...)`（`SimuCoronary/geometry.py`） | 沿程面积/侧支重采样到目标 `nx` |
 | `build_virtual_stent(...)`（`SimuCoronary/geometry.py`） | 按近/远端参考重构支架段面积（虚拟 FFR）；`NavierStokes1D.apply_virtual_stent()` 调用 |
@@ -1068,7 +1115,8 @@ NavierStokes1D(
 | `_spatial_operator(state)` | 有限体积右端项 \(-\partial_x\hat F+S\)（对流 + 压力梯度 + 摩擦 + 侧支汇） |
 | `_apply_boundaries(state, advance)` | 特征相容的入口/侧支/出口边界；壅塞端退回零梯度或保留 PDE 流量 |
 | `mass_balance(cycle_s=0.8)` | 末段质量残差 `<Q(0)>−<Q(L)>−<ΣQ_b>`，以及 `dV/dt` |
-| `_clip_state(state, area_ref)` | 面积下限钳位（`MINIMUM_AREA_RATIO`） |
+| `_clip_state(state, area_floor)` | 面积下限钳位（\(A_{\min}=0.05A_0\)，见 §5.3） |
+| `_refresh_area_floor(verbose=True)` | 重算 `self.area_floor = MINIMUM_AREA_RATIO · A₀`；构造末尾与 `apply_virtual_stent()` 后各一次 |
 | `_stable_timestep(state)` | CFL 自适应时间步 |
 | `_ssp_rk2_step(dt)` | 单步 SSP-RK2 推进 |
 | `pressure_extrema_mmhg(cycle_s=None, cache=True)` | 末段一个心动周期的入口/出口压力峰谷（收缩压/舒张压类比），返回字典并缓存到 `self.pressure_extrema`（§9.3） |
@@ -1133,7 +1181,7 @@ solver.run(duration_s=3.0)
 # [WP diag max over last 50%T] lam- max=+184.7, lam+ min=+603.9 | worst λ₋ @ idx=92 (x=2.681 cm, ...)
 #   !! 跨临界/壅塞: 9 个节点 lambda- > 0，x ∈ [2.565, 2.798] cm ...
 #      该处 Q_crit = c·A = 3.913 mL/s，实际 Q_peak = 5.412 mL/s (超 1.38 倍)
-#   !! 面积钳位: 7681 个采样点触及 A/A0 = 0.80 下限 (1.9%) ...
+#   !! 面积钳位: 0 个采样点触及 A/A0 = 0.05 下限 (0.00%) ...
 
 stats = solver.wellposedness_diagnostics()   # 只取字典，不打印
 ```
@@ -1151,7 +1199,7 @@ stats = solver.wellposedness_diagnostics()   # 只取字典，不打印
 | `choked_x_min` / `choked_x_max` | 壅塞区 x 范围 (cm) |
 | `q_crit_worst` / `q_peak_worst` | 最危险处临界流量 / 实际峰值流量 (mL/s) |
 | `c_worst` / `u_worst` | 最危险处波速 / 流速 (cm/s) |
-| `n_clamp` / `clamp_fraction` | 触及 `0.8·A₀` 下限的采样点数 / 占比 |
+| `n_clamp` / `clamp_fraction` | 触及 \(A_{\min}=0.05A_0\) 的采样点数 / 占比（**应恒为 0**；非 0 说明结果不可用于定量分析） |
 
 #### 与 CFL 的关系（注意区别）
 
@@ -1171,7 +1219,9 @@ CFL 用的是 \(\lambda_{\max}=\max(\lvert u\rvert+c)\)，只关心**数值稳�
 | 88 | 2.565 | 1.411 | — | — | 近临界附近 |
 | 89 | 2.594 | 1.268 | — | — | \(\lambda_->0\) 跨临界 |
 | 92 | 2.681 | 0.836 | 452.2 | 620.6 | \(\lambda_-\) 最危险 |
-| 93 | 2.711 | **0.800** | — | — | 已触面积下限 |
+| 93 | 2.711 | — | — | — | 跨临界最深处 |
+
+> **数值口径提示**：上表的 `A/A₀` 采自更早的算例记录，各列仅供参考。当前 `MINIMUM_AREA_RATIO = 0.05`（纯数值保护），实测同一算例 `n_clamp = 0`，即表中「已触面积下限」的状态在现设置下不会出现——`A/A₀` 会继续下探到 0.44–0.49，管腔压相应降到 −20 至 −50 mmHg。负压在这里是守恒方程的解（见 §5.3.1），不是数值错误。
 
 #### 回到亚临界的三种途径
 
@@ -1181,7 +1231,7 @@ CFL 用的是 \(\lambda_{\max}=\max(\lvert u\rvert+c)\)，只关心**数值稳�
 | 降低峰值流量 | 约需降 **28–34%**（\(Q_{\text{crit}}\approx3.6\text{–}3.9\) mL/s） | 治标，且改变生理工况 |
 | 加狭窄局部损失项 | \(\Delta p=K\rho Q^2/(2A^2)\) | 从机理上抑制喉部超速，可与定压入口组合 |
 
-> **关于面积钳位与跨临界的因果关系**：实测表明跨临界**先于**钳位发生（idx 89–92 已 \(\lambda_->0\) 时钳位未生效），因此钳位是结果而非跨临界的成因。真实成因是**定流量入口把峰值流量强行压过过小的喉部截面**。
+> **关于面积钳位与跨临界的因果关系**：实测表明跨临界**先于**钳位发生（idx 89–92 已 \(\lambda_->0\) 时钳位未生效），因此钳位是结果而非跨临界的成因。真实成因是**定流量入口把峰值流量强行压过过小的喉部截面**。当前 `MINIMUM_AREA_RATIO = 0.05` 足够小，这类算例的 `n_clamp` 实测为 0，跨临界问题会以**负压**而非钳位的形式暴露出来。
 
 ---
 

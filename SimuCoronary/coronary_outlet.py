@@ -359,7 +359,7 @@ def plot_coronary_outlet_pressure(
 
 
 if __name__ == "__main__":
-    hr, co, frac = 75.0, 5.5 * 0.66, 0.03
+    hr, co, frac = 75.0, 5.5, 0.03
     duration_s = 15
     r_d = 25
     r_p = 0.2 * r_d if r_d is not None else None

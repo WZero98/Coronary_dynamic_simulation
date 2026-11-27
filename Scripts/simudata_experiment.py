@@ -85,6 +85,9 @@ SOLVER_FILENAME = "solver.pkl"
 LENGTH_CM = 10.0
 DX_TARGET_CM = 0.02
 N_CELLS = int(round(LENGTH_CM / DX_TARGET_CM)) + 1  # 501，dx ≈ 0.02 cm
+# 求解前统一重采样到该节点数：CFL 下 dt ∝ dx，从 501 降到 200 可把时间步数
+# 减少约 2.5 倍（见 resample_axial_profile 调用处）
+RESAMPLE_NX = 200
 
 AREA_SCALER = 1.0
 PROX_AREA = 0.15 * AREA_SCALER
@@ -93,7 +96,7 @@ STENOSIS_RATE = 0.5
 STENOSIS_POSITION = 0.5
 STENOSIS_FRACTION = 0.2
 BRANCH_POSITIONS = [0.25, 0.5, 0.75]
-BRANCH_DIAMETERS = [0.15 * np.sqrt(AREA_SCALER)] * 3
+BRANCH_DIAMETERS = [float(0.15 * np.sqrt(AREA_SCALER))] * 3
 
 DURATION_S = 3.0
 RECORD_INTERVAL_STEPS = 30
@@ -325,13 +328,21 @@ def run_one_case(
         area = vessel.generate_area()
         branch_idx, branch_dia = vessel.generate_branch()
 
-        # 此处添加重采样：resample_axial_profile，将节点数重采样为统一的200个节点
-        area, dx_cm, n_cells, branch_idx, branch_dia = resample_axial_profile(
-            area,
-            target_nx=200,
-            branch_frame_indices=branch_idx,
-            branch_diameters_cm=branch_dia,
-            frame_spacing_cm=vessel.dx_cm,
+        # 轴向重采样到统一 RESAMPLE_NX 节点（各算例原始 nx=501，降采样可显著
+        # 减少时间步数）。注意 resample_axial_profile 的第 2 个返回值是
+        # **物理长度** (cm)，不是 dx；返回的 branch_idx / diams 是 list 而非
+        # ndarray，后续用 len() 而不是 .size。
+        # length_cm 显式传入：否则函数用 frame_spacing_cm * nx = 0.02*501
+        # 推得 10.02 cm，与 vessel.vessel_length_cm (10.0) 有 0.2% 偏差。
+        area, length_cm, nx_resampled, branch_idx, branch_dia = (
+            resample_axial_profile(
+                area,
+                target_nx=RESAMPLE_NX,
+                branch_frame_indices=branch_idx,
+                branch_diameters_cm=branch_dia,
+                frame_spacing_cm=vessel.dx_cm,
+                length_cm=vessel.vessel_length_cm,
+            )
         )
 
         # 几何图（原始 + 平滑）
@@ -409,10 +420,13 @@ def run_one_case(
             "key": spec.key,
             "label": spec.label,
             "case_dir": tag,
-            "n_cells": int(vessel.n_cells),
-            "length_cm": float(vessel.vessel_length_cm),
-            "dx_cm": float(vessel.dx_cm),
-            "n_branch": int(branch_idx.size),
+            # 以下三项记录**重采样后**的实际仿真网格（不是 vessel 的原始值），
+            # 否则与 solver.nx / solver.dx 不一致
+            "n_cells": int(nx_resampled),
+            "length_cm": float(length_cm),
+            "dx_cm": float(length_cm / max(nx_resampled - 1, 1)),
+            # branch_idx 是 resample_axial_profile 返回的 list，用 len() 计数
+            "n_branch": int(len(branch_idx)),
             "has_stenosis": bool(vessel.has_stenosis),
             "mla_area_cm2": float(vessel.mla_area_cm2),
             "area_min_cm2": float(area.min()),
@@ -439,7 +453,9 @@ def run_one_case(
             "solver_cache": os.path.relpath(solver_path, out_root),
             "wall_s": float(time.perf_counter() - t_start),
             # 供汇总图使用（不写入 JSON 的部分会被过滤）
-            "_x_cm": vessel.x_cm.tolist(),
+            # 注意：area/ffr/p_mean 都是**重采样后**的 nx_resampled 长度，
+            # 因此 x 坐标必须用重采样网格，不能用 vessel.x_cm（原始 501 点）
+            "_x_cm": np.linspace(0.0, length_cm, nx_resampled).tolist(),
             "_ffr": ffr.tolist(),
             "_area": area.tolist(),
             "_p_mean": p_mean.tolist(),
@@ -772,8 +788,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             raise SystemExit(f"--only {args.only!r} 没有匹配的算例")
 
     print(f"共 {len(cases)} 个算例；输出目录：{args.out}")
-    print(f"网格：L={LENGTH_CM} cm, n_cells={N_CELLS}, "
-          f"dx={LENGTH_CM / (N_CELLS - 1):.5f} cm")
+    print(f"网格：生成 n_cells={N_CELLS} (dx={LENGTH_CM / (N_CELLS - 1):.5f} cm)"
+          f" → 求解前重采样到 n_cells={RESAMPLE_NX} "
+          f"(dx={LENGTH_CM / (RESAMPLE_NX - 1):.5f} cm)")
     print(f"标定：duration={DURATION_S}s, peak∈({PEAK_LO_MMHG}, "
           f"{PEAK_HI_MMHG}) mmHg, max_iters={MAX_ITERS}, virtual_stent=False")
     print(f"并行：{args.workers} 进程")
@@ -836,8 +853,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "workers": args.workers,
         "settings": {
             "length_cm": LENGTH_CM,
-            "n_cells": N_CELLS,
-            "dx_cm": LENGTH_CM / (N_CELLS - 1),
+            # 生成网格 501 节点，随后在 run_one_case 内重采样到 RESAMPLE_NX
+            "n_cells_generated": N_CELLS,
+            "n_cells": RESAMPLE_NX,
+            "resample_nx": RESAMPLE_NX,
+            "dx_cm": LENGTH_CM / (RESAMPLE_NX - 1),
             "duration_s": DURATION_S,
             "record_interval_steps": RECORD_INTERVAL_STEPS,
             "peak_lo_mmhg": PEAK_LO_MMHG,

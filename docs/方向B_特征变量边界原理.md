@@ -770,7 +770,7 @@ $$
 g(A)=\frac{Q_{\mathrm{in}}}{A}-4\gamma A^{1/4}
 $$
 
-对 $A>0$ **严格递减**（两项均随 $A$ 增大而减小），故至多一个正根。代码 `area_from_flow_and_w_minus` 用二分法求根；若根低于面积下限 $A_{\min}=\texttt{MINIMUM\_AREA\_RATIO}\cdot A_0(0)$，则钳到下限（与 tube law 钳位一致，此时不变量无法精确满足）。
+对 $A>0$ **严格递减**（两项均随 $A$ 增大而减小），故至多一个正根。代码 `area_from_flow_and_w_minus` 用二分法求根；若根低于面积下限 $A_{\min}=\texttt{MINIMUM\_AREA\_RATIO}\cdot A_0(0)$（比例 0.05，纯数值保护），则钳到下限（与 tube law 钳位一致，此时不变量无法精确满足）。
 
 特殊情形：$Q_{\mathrm{in}}\approx 0$ 且 $W_-<0$ 时，可显式
 
